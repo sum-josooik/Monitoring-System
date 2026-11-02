@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ROS Web Monitor</title>
+    <link rel="stylesheet" href="/app.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title-box" data-hitem="title">
+        <h1 id="appTitle">ROS Web Monitor</h1>
+        <p id="clock">연결 중</p>
+      </div>
+      <div class="top-controls" id="topControls">
+        <div class="layout-ctl" data-hitem="layout">
+          <div class="layout-cur"><span>Layout</span><strong id="layoutName">Balanced</strong></div>
+          <div class="layout-edit-bar">
+            <select id="layoutMode"><option value="balanced">Balanced</option><option value="wide-viz">Wide RViz</option><option value="camera-focus">Camera Focus</option><option value="topic-focus">Topic Focus</option><option value="custom">Custom</option></select>
+            <button id="saveLayout" type="button">Save</button>
+            <button id="cancelLayout" type="button">Cancel</button>
+          </div>
+          <button id="editLayout" type="button">Edit Layout</button>
+        </div>
+        <div class="viewmode-ctl" data-hitem="viewmode">
+          <button class="viewmode-btn" data-mode="live" type="button">● 실시간 뷰</button>
+          <button class="viewmode-btn" data-mode="play" type="button">▶ Play 뷰</button>
+        </div>
+        <div class="bag-ctl" data-hitem="bag">
+          <button id="bagToggle" type="button" class="bag-btn">● Bag</button>
+          <span id="bagStatus" class="bag-status" hidden>recording....</span>
+        </div>
+        <div class="bagplay-ctl" data-hitem="bagplay">
+          <button id="bagPlayToggle" type="button" class="bagplay-btn">▶ Play</button>
+          <span id="bagPlayStatus" class="bagplay-status" hidden></span>
+        </div>
+        <button id="btnReboot" type="button" class="power-btn reboot" data-hitem="reboot" title="재부팅 (reboot)">⟳ 재부팅</button>
+        <button id="btnShutdown" type="button" class="power-btn shutdown" data-hitem="shutdown" title="종료 (shutdown -h now)">⏻ 종료</button>
+        <div class="stat-item" data-hitem="stat-topics"><strong id="topicCount">0</strong><span>topics</span></div>
+        <div class="stat-item" data-hitem="stat-active"><strong id="activeCount">0</strong><span>active</span></div>
+        <div class="stat-item" data-hitem="stat-cameras"><strong id="cameraCount">0</strong><span>cameras</span></div>
+        <button id="headerSettings" type="button" class="header-gear" title="화면 / Bag 설정">⚙</button>
+      </div>
+    </header>
+
+    <div id="playBanner" class="play-banner" hidden>
+      <span class="play-banner-dot"></span>
+      <button id="playPauseBtn" type="button" class="play-ctrl-btn" title="일시정지/재생" hidden>⏸</button>
+      <button id="playNextBtn" type="button" class="play-ctrl-btn" title="다음 프레임 (일시정지 중)" hidden>⏭</button>
+      <span id="playBannerText">재생 중</span>
+      <span id="playTimeCur" class="play-time" hidden>0:00</span>
+      <input id="playSeekBar" type="range" class="play-seek-bar" min="0" max="1" step="0.1" value="0" hidden>
+      <span id="playTimeDur" class="play-time" hidden>0:00</span>
+      <select id="playRateSel" class="play-rate-sel" title="배속" hidden>
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+      </select>
+      <button id="playBannerStop" type="button">■ 중지</button>
+    </div>
+
+    <main id="dashboard" class="dashboard layout-balanced">
+      <div id="colResizeHandle" class="col-resize-handle"></div>
+      <aside class="left-rail panel-zone" data-zone="left">
+        <nav class="left-tabs" id="leftTabs">
+          <button class="left-tab" data-tab="topics" type="button">토픽</button>
+          <button class="left-tab" data-tab="groups" type="button">센서</button>
+          <button class="left-tab" data-tab="system" type="button">시스템</button>
+        </nav>
+        <section class="panel topic-panel" data-panel="topics" draggable="true">
+          <div class="section-head"><button class="drag-handle" type="button" title="drag panel">::</button><div><h2>Topic Health</h2><span id="shownCount">0 shown</span></div></div>
+          <div class="toolbar">
+            <label class="search"><span>Search</span><input id="searchInput" type="search" placeholder="/scan, radar, camera"></label>
+            <label class="select"><span>Group</span><select id="groupFilter"><option value="all">All</option><option value="cameras">Cameras</option><option value="lidar">LiDAR</option><option value="radar">Radar</option><option value="localization">Localization</option><option value="vehicle_can">Vehicle/CAN</option><option value="perception">Perception</option></select></label>
+            <label class="check-row compact"><input id="activeOnly" type="checkbox"><span>Active only</span></label>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>State</th><th>Topic</th><th>Hz</th><th>Age</th></tr></thead><tbody id="topicRows"></tbody></table></div>
+        </section>
+
+        <section class="panel groups-panel" data-panel="groups" draggable="true">
+          <div class="section-head"><button class="drag-handle" type="button" title="drag panel">::</button><div><h2>Sensor Groups</h2><span>grouped by topic role</span></div></div>
+          <div id="groupGrid" class="group-grid"></div>
+        </section>
+
+        <section class="panel system-panel" data-panel="system" draggable="true">
+          <div class="section-head"><button class="drag-handle" type="button" title="drag panel">::</button><div><h2>Jetson Monitor</h2><span id="systemSubtitle">waiting for system data</span></div></div>
+          <div id="systemGrid" class="system-grid"></div>
+        </section>
+      </aside>
+
+      <section class="right-stage panel-zone" data-zone="right">
+        <section class="panel viz-panel" data-panel="rviz" draggable="true">
+          <div class="section-head">
+            <button class="drag-handle" type="button" title="drag panel">::</button>
+            <div><h2>RViz Monitor</h2><span id="vizStats">drag rotate, wheel zoom</span></div>
+            <div class="viz-actions">
+              <button id="zoomOut" type="button">-</button>
+              <input id="zoomRange" type="range" min="0.45" max="30.0" step="0.05" value="1">
+              <button id="zoomIn" type="button">+</button>
+              <button id="viewReset" type="button">Reset</button>
+              <button class="view-preset" data-view="top" type="button">Top</button>
+              <button class="view-preset" data-view="front" type="button">Front</button>
+              <button class="view-preset" data-view="left" type="button">Left</button>
+              <button class="view-preset" data-view="right" type="button">Right</button>
+            </div>
+          </div>
+          <div class="viz-shell">
+            <canvas id="vizCanvas"></canvas>
+            <div id="vizAlert" class="viz-alert" hidden></div>
+<div class="viz-legend"></div>
+          </div>
+        </section>
+
+        <section class="panel camera-panel" data-panel="camera" draggable="true">
+          <div class="section-head">
+            <button class="drag-handle" type="button" title="drag panel">::</button>
+            <div><h2>Camera Preview</h2><span id="cameraStatus"></span></div>
+          </div>
+          <div id="cameraEditBar" class="camera-edit-bar" hidden>
+            <span class="cam-edit-label">열 수</span>
+            <div class="cam-col-btns">
+              <button class="cam-col-btn" data-cols="1" type="button">1</button>
+              <button class="cam-col-btn" data-cols="2" type="button">2</button>
+              <button class="cam-col-btn" data-cols="3" type="button">3</button>
+              <button class="cam-col-btn" data-cols="4" type="button">4</button>
+            </div>
+            <button id="camAddSlot" type="button">＋ 추가</button>
+            <button id="doneCameraLayout" type="button">완료</button>
+          </div>
+          <div id="cameraGrid" class="camera-grid"></div>
+        </section>
+
+        <section class="panel gps-panel" data-panel="gps" draggable="true">
+          <div class="section-head">
+            <button class="drag-handle" type="button" title="drag panel">::</button>
+            <div><h2>GPS Map</h2><span id="gpsSubtitle">waiting for /gpsfix</span></div>
+            <a id="gpsOpenMap" href="#" target="_blank" rel="noopener noreferrer" class="gps-open-link">Maps ↗</a>
+          </div>
+          <div class="gps-info-bar">
+            <div class="gps-coord"><span class="gps-lbl">LAT</span><span id="gpsLat">—</span></div>
+            <div class="gps-coord"><span class="gps-lbl">LNG</span><span id="gpsLng">—</span></div>
+            <div class="gps-coord"><span class="gps-lbl">ALT</span><span id="gpsAlt">—</span></div>
+          </div>
+          <div class="gps-toolbar">
+            <button id="gpsTrackRec" type="button" class="gps-recenter-btn" title="이동 경로 기록 시작/저장">● 경로 기록</button>
+            <button id="gpsTrackLoad" type="button" class="gps-recenter-btn" title="저장된 이동 경로 불러오기">🗂 이동 경로 불러오기</button>
+            <button id="gpsRecenter" type="button" class="gps-recenter-btn" title="현재 위치로 이동">📍 현재 위치</button>
+            <div id="gpsTrackMenu" class="gps-track-menu" hidden></div>
+          </div>
+          <div class="gps-map-wrap"><div id="gpsMap"></div></div>
+        </section>
+
+        <section class="panel vehicle-panel" data-panel="vehicle" draggable="true">
+          <div class="section-head">
+            <button class="drag-handle" type="button" title="drag panel">::</button>
+            <div><h2>Vehicle Monitor</h2><span id="vehicleSubtitle">/acu_ck2_ver2</span></div>
+          </div>
+          <div id="vehicleBody" class="vehicle-body"></div>
+        </section>
+
+        <section class="panel events-panel" data-panel="events" draggable="true">
+          <div class="section-head">
+            <button class="drag-handle" type="button" title="drag panel">::</button>
+            <div><h2>이벤트 로그</h2><span id="evtSubtitle"></span></div>
+          </div>
+          <div id="evtRows" class="evt-rows"></div>
+        </section>
+
+        <section class="panel objects-panel" data-panel="objects" draggable="true">
+          <div class="section-head">
+            <button class="drag-handle" type="button" title="drag panel">::</button>
+            <div><h2>감지 객체</h2><span id="objSubtitle"></span></div>
+          </div>
+          <div class="obj-head"><span>#</span><span>유형</span><span>방위</span><span>거리</span><span>크기</span></div>
+          <div id="objRows" class="obj-rows"></div>
+        </section>
+      </section>
+    </main>
+
+    <!-- 통합 설정 Modal (화면 구성 / Bag / RViz / 백업) -->
+    <div id="bagOverlay" class="vsm-overlay" hidden></div>
+    <div id="bagModal" class="vsm-modal" hidden>
+      <div class="vsm-inner">
+        <div class="vsm-head">
+          <h3>설정</h3>
+          <button id="bagModalClose" type="button" title="Close">×</button>
+        </div>
+        <nav class="set-tabs">
+          <button class="set-tab active" data-settab="header" type="button">화면 구성</button>
+          <button class="set-tab" data-settab="bag" type="button">Bag 녹화</button>
+          <button class="set-tab" data-settab="rviz" type="button">RViz</button>
+          <button class="set-tab" data-settab="backup" type="button">백업</button>
+        </nav>
+        <div class="vsm-body">
+          <div id="setPanelHeader" class="set-panel">
+            <p class="set-hint">⠿ 드래그로 순서 변경 · 이름 직접 입력 · 체크로 표시/숨김</p>
+            <div id="headerItemList" class="header-item-list"></div>
+            <button id="headerReset" type="button" class="bag-quick set-reset">기본값으로 초기화</button>
+          </div>
+
+          <div id="setPanelRviz" class="set-panel" hidden>
+            <section class="vsm-section">
+              <div class="vsm-section-title">시각화 품질</div>
+              <div class="vsm-row">
+                <label class="vsm-field"><span>Points / topic</span>
+                  <select id="vizMaxPoints">
+                    <option value="300">300 pts (light)</option>
+                    <option value="900">900 pts (default)</option>
+                    <option value="2000">2000 pts (dense)</option>
+                    <option value="5000">5000 pts (ultra)</option>
+                    <option value="10000">10000 pts</option>
+                    <option value="20000">20000 pts</option>
+                    <option value="40000">40000 pts (max)</option>
+                  </select>
+                </label>
+                <label class="vsm-field"><span>표시 범위</span>
+                  <select id="vizRange">
+                    <option value="30">30 m</option>
+                    <option value="70">70 m</option>
+                    <option value="120">120 m (default)</option>
+                    <option value="200">200 m</option>
+                  </select>
+                </label>
+                <label class="vsm-field"><span>기본 확대/축소 (0.45~30)</span>
+                  <input id="vizDefaultZoom" type="number" min="0.45" max="30.0" step="0.05" value="1">
+                </label>
+              </div>
+            </section>
+            <section class="vsm-section">
+              <div class="vsm-section-title">레이어 설정 <span class="vsm-hint">— 레이어별 이름·색상·토픽 지정, ＋로 추가</span></div>
+              <div id="vsmLayerConfig" class="vsm-layer-config"></div>
+            </section>
+          </div>
+
+          <div id="setPanelBackup" class="set-panel" hidden>
+            <p class="set-hint">현재 모든 설정(레이아웃·헤더·Bag·RViz·카메라·Vehicle 카드)을 JSON 파일로 저장하거나 불러옵니다.</p>
+            <div class="backup-actions">
+              <button id="backupExport" type="button" class="backup-btn">⬇ 설정 백업 다운로드</button>
+              <button id="backupImportBtn" type="button" class="backup-btn">⬆ 백업 불러오기</button>
+              <input id="backupImportFile" type="file" accept="application/json,.json" hidden>
+            </div>
+            <div class="backup-divider"></div>
+            <p class="set-hint">현재 화면 구성을 "기본값"으로 저장해두면, 언제든 한 번에 되돌릴 수 있습니다.</p>
+            <div class="backup-actions">
+              <button id="backupSaveDefault" type="button" class="backup-btn">★ 현재 설정을 기본값으로 저장</button>
+              <button id="backupRestoreDefault" type="button" class="backup-btn">↺ 기본값으로 되돌리기</button>
+            </div>
+            <div id="backupInfo" class="backup-info"></div>
+          </div>
+
+          <div id="setPanelBag" class="set-panel" hidden>
+            <div class="bag-dir-row">
+              <label class="bag-dir-label" for="bagDirInput">저장 경로</label>
+              <div class="bag-dir-input-wrap">
+                <input type="text" id="bagDirInput" class="bag-dir-input" placeholder="/home/nvidia/robot_ws/bag" spellcheck="false" autocomplete="off">
+                <button type="button" id="bagDirBrowseBtn" class="bag-dir-browse-btn">📁 찾아보기</button>
+              </div>
+            </div>
+            <p class="set-hint" id="bagDirHint">녹화 파일과 재생 목록이 저장되는 폴더입니다. 절대 경로로 입력하거나 찾아보기로 선택하세요. 녹화·재생 중에는 변경할 수 없습니다.</p>
+            <div class="backup-divider"></div>
+            <label class="bag-toggle-row">
+              <div class="bag-toggle-text">
+                <span class="bag-toggle-title">전체 토픽 녹화</span>
+                <span class="bag-toggle-desc">모든 토픽을 기록합니다 (<code>-a</code>)</span>
+              </div>
+              <span class="bag-switch"><input type="checkbox" id="bagAll"><i></i></span>
+            </label>
+            <div id="bagPicker" class="bag-picker">
+              <div class="bag-picker-bar">
+                <div class="bag-search-wrap">
+                  <span class="bag-search-ico">⌕</span>
+                  <input type="search" id="bagTopicSearch" class="bag-topic-search" placeholder="토픽 검색…">
+                </div>
+                <button id="bagSelectAll" type="button" class="bag-quick">모두 선택</button>
+                <button id="bagSelectNone" type="button" class="bag-quick">선택 해제</button>
+              </div>
+              <div id="bagTopicList" class="bag-topic-list"></div>
+            </div>
+          </div>
+        </div>
+        <div class="vsm-foot">
+          <span id="bagSelCount" class="bag-sel-count"></span>
+          <button id="bagModalSave" type="button">저장</button>
+          <button id="bagModalCancel" type="button">취소</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bag 재생(Play) 파일 선택 Modal -->
+    <div id="playOverlay" class="vsm-overlay" hidden></div>
+    <div id="playModal" class="vsm-modal play-modal" hidden>
+      <div class="vsm-inner">
+        <div class="vsm-head">
+          <h3>Bag 재생</h3>
+          <button id="playModalClose" type="button" title="Close">×</button>
+        </div>
+        <div class="vsm-body">
+          <p class="set-hint">저장된 bag을 선택해 재생합니다. ROS1(.bag)·ROS2(폴더) 모두 지원하며, 재생된 토픽은
+            <code>/bagplay/...</code> 네임스페이스로 격리되어 실시간 데이터와 섞이지 않습니다. 재생을 시작하면
+            자동으로 Play 뷰로 전환됩니다.</p>
+          <label class="check-row compact"><input id="playLoopChk" type="checkbox"><span>반복 재생</span></label>
+          <div id="playFileList" class="play-file-list"></div>
+        </div>
+        <div class="vsm-foot">
+          <span id="playStatusLabel" class="bag-sel-count"></span>
+          <button id="playStopBtn" type="button" hidden>■ 재생 중지</button>
+          <button id="playModalCancelBtn" type="button">닫기</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 폴더 선택 Modal (Bag 저장 경로용) -->
+    <div id="dirBrowseOverlay" class="vsm-overlay dir-browse-overlay" hidden></div>
+    <div id="dirBrowseModal" class="vsm-modal dir-browse-modal" hidden>
+      <div class="vsm-inner">
+        <div class="vsm-head">
+          <h3>폴더 선택</h3>
+          <button id="dirBrowseClose" type="button" title="Close">×</button>
+        </div>
+        <div class="vsm-body">
+          <div id="dirBrowsePath" class="dir-browse-path">/</div>
+          <div id="dirBrowseList" class="dir-browse-list"></div>
+          <div class="dir-browse-new">
+            <input type="text" id="dirBrowseNewName" placeholder="새 폴더 이름" spellcheck="false" autocomplete="off">
+            <button type="button" id="dirBrowseNewBtn">＋ 새 폴더</button>
+          </div>
+          <div id="dirBrowseWritable" class="dir-browse-warn"></div>
+        </div>
+        <div class="vsm-foot">
+          <span id="dirBrowseSelHint" class="bag-sel-count"></span>
+          <button id="dirBrowseSelectBtn" type="button" class="dir-browse-select">이 폴더 선택</button>
+          <button id="dirBrowseCancelBtn" type="button">취소</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
