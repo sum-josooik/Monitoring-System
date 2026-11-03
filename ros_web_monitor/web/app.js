@@ -2248,6 +2248,7 @@ function refreshCameraStream(card, slot, options) {
     if (img.dataset.topic) { img.removeAttribute('src'); img.dataset.topic = ''; }
     title.textContent = '—';
     age.textContent = '';
+    applyCameraSignalState(card, null);
     return;
   }
   // 카메라 스트림은 보조 포트로 분리 (메인 포트의 브라우저 동시연결 한도 보호)
@@ -2260,6 +2261,16 @@ function refreshCameraStream(card, slot, options) {
   }
   title.textContent = camera.name.split('/').filter(Boolean).slice(-1)[0] || camera.name;
   age.textContent = camera.age_sec == null ? 'waiting' : `${camera.age_sec}s ago`;
+  applyCameraSignalState(card, camera);
+}
+
+// 마지막 프레임이 오래되면 카드에 '신호 없음' 표시 (CSS: .cam-stale / .cam-waiting)
+const CAMERA_STALE_SEC = 3;
+function applyCameraSignalState(card, camera) {
+  card.classList.toggle('cam-empty', !camera);
+  const waiting = !!camera && camera.age_sec == null;
+  card.classList.toggle('cam-waiting', waiting);
+  card.classList.toggle('cam-stale', !!camera && !waiting && camera.age_sec > CAMERA_STALE_SEC);
 }
 
 // MJPEG 스트림 시작 + 실패(브라우저 연결한도/일시 끊김) 시 자동 재시도.
@@ -2318,6 +2329,7 @@ function renderCameras() {
       const camera = activeCameraFor(slot);
       const age = card.querySelector('span');
       if (age && camera) age.textContent = camera.age_sec == null ? 'waiting' : `${camera.age_sec}s ago`;
+      applyCameraSignalState(card, camera);
     }
   }
   cameraStatus.textContent = `${view.cameraLayout.slots.length}개 슬롯 · ${options.length}개 토픽`;
