@@ -73,6 +73,23 @@ def static_dir():
 
 STATIC_DIR = static_dir()
 
+
+def ui_settings_dir():
+    # 설치본(share/ros_web_monitor/UI) 우선, 없으면 소스 트리의 UI/
+    for d in (STATIC_DIR.parent / 'UI', Path(__file__).resolve().parent.parent / 'UI'):
+        if d.is_dir():
+            return d
+    return None
+
+
+def default_ui_settings_file():
+    # UI/ 폴더의 설정 백업 JSON 중 가장 최신(파일명 타임스탬프 기준)
+    d = ui_settings_dir()
+    if d is None:
+        return None
+    files = sorted(d.glob('*.json'))
+    return files[-1] if files else None
+
 # ── ROS1 bag → ROS2 bag 변환용 격리 venv ──
 # 시스템 파이썬(externally-managed-environment)을 건드리지 않도록 사용자 홈 아래
 # 전용 venv에 'rosbags' 패키지를 최초 1회만 설치해서 사용한다 (jtop venv와 동일한 패턴).
@@ -2042,6 +2059,12 @@ def make_handler(node):
                 self.serve_file(STATIC_DIR / 'app.css')
             elif parsed.path == '/app.js':
                 self.serve_file(STATIC_DIR / 'app.js')
+            elif parsed.path == '/api/ui/default-settings':
+                path = default_ui_settings_file()
+                if path is None:
+                    self.send_error(HTTPStatus.NOT_FOUND, 'No UI settings file')
+                else:
+                    self.serve_file(path)
             elif parsed.path == '/api/state':
                 self.serve_json_str(node.snapshot_json())
             elif parsed.path == '/events':

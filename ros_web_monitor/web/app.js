@@ -2246,9 +2246,9 @@ function refreshCameraStream(card, slot, options) {
   const age = card.querySelector('span');
   if (!camera || !slot.topic) {
     if (img.dataset.topic) { img.removeAttribute('src'); img.dataset.topic = ''; }
-    title.textContent = '—';
-    age.textContent = '';
-    applyCameraSignalState(card, null);
+    title.textContent = slot.topic ? (slot.topic.split('/').filter(Boolean)[0] || slot.topic) : '—';
+    age.textContent = slot.topic ? '수신 없음' : '';
+    applyCameraSignalState(card, null, slot);
     return;
   }
   // 카메라 스트림은 보조 포트로 분리 (메인 포트의 브라우저 동시연결 한도 보호)
@@ -2261,16 +2261,20 @@ function refreshCameraStream(card, slot, options) {
   }
   title.textContent = camera.name.split('/').filter(Boolean).slice(-1)[0] || camera.name;
   age.textContent = camera.age_sec == null ? 'waiting' : `${camera.age_sec}s ago`;
-  applyCameraSignalState(card, camera);
+  applyCameraSignalState(card, camera, slot);
 }
 
-// 마지막 프레임이 오래되면 카드에 '신호 없음' 표시 (CSS: .cam-stale / .cam-waiting)
+// 카드 신호 상태 (CSS: .cam-empty / .cam-waiting / .cam-stale)
+//  - 토픽 미지정 → empty
+//  - 토픽 지정했지만 발행 안 됨, 또는 마지막 프레임이 오래됨 → stale('신호 없음')
 const CAMERA_STALE_SEC = 3;
-function applyCameraSignalState(card, camera) {
-  card.classList.toggle('cam-empty', !camera);
+function applyCameraSignalState(card, camera, slot) {
+  const empty = !slot.topic;
   const waiting = !!camera && camera.age_sec == null;
+  const stale = !empty && (!camera || (!waiting && camera.age_sec > CAMERA_STALE_SEC));
+  card.classList.toggle('cam-empty', empty);
   card.classList.toggle('cam-waiting', waiting);
-  card.classList.toggle('cam-stale', !!camera && !waiting && camera.age_sec > CAMERA_STALE_SEC);
+  card.classList.toggle('cam-stale', stale);
 }
 
 // MJPEG 스트림 시작 + 실패(브라우저 연결한도/일시 끊김) 시 자동 재시도.
@@ -2329,7 +2333,7 @@ function renderCameras() {
       const camera = activeCameraFor(slot);
       const age = card.querySelector('span');
       if (age && camera) age.textContent = camera.age_sec == null ? 'waiting' : `${camera.age_sec}s ago`;
-      applyCameraSignalState(card, camera);
+      applyCameraSignalState(card, camera, slot);
     }
   }
   cameraStatus.textContent = `${view.cameraLayout.slots.length}개 슬롯 · ${options.length}개 토픽`;
@@ -3121,6 +3125,30 @@ $('#backupImportFile').addEventListener('change', (e) => {
 });
 $('#backupSaveDefault').addEventListener('click', saveCurrentAsDefault);
 $('#backupRestoreDefault').addEventListener('click', restoreDefault);
+
+// 서버의 UI/ 폴더 설정 파일(가장 최신)로 전체 설정 교체
+async function loadUiFolderSettings() {
+  if (!(await vdConfirm('UI 폴더의 설정 파일로 전체 설정을 바꿉니다.\n현재 설정은 덮어써집니다. 계속할까요?'))) return;
+  try {
+    const res = await fetch('/api/ui/default-settings', { cache: 'no-store' });
+    if (!res.ok) throw new Error('UI 폴더에 설정 파일이 없습니다');
+    const obj = await res.json();
+    const settings = obj && obj.settings && typeof obj.settings === 'object' ? obj.settings : obj;
+    const keys = Object.keys(settings || {}).filter((k) => k.startsWith('rosWeb') && typeof settings[k] === 'string');
+    if (!keys.length) throw new Error('복원할 rosWeb 설정 항목이 없습니다');
+    const toRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('rosWeb') && k !== DEFAULT_SNAPSHOT_KEY) toRemove.push(k);
+    }
+    toRemove.forEach((k) => localStorage.removeItem(k));
+    keys.forEach((k) => localStorage.setItem(k, settings[k]));
+    location.reload();
+  } catch (e) {
+    vdNotice('UI 폴더 설정 불러오기 실패: ' + e.message);
+  }
+}
+$('#backupLoadUiFile').addEventListener('click', loadUiFolderSettings);
 
 postVizConfig(view.vizSettings);
 renderVizLegend();

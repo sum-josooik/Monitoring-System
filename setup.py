@@ -12,6 +12,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/web', glob('ros_web_monitor/web/*')),
+        ('share/' + package_name + '/UI', glob('UI/*.json')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
