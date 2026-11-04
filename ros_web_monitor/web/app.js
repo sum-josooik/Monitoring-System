@@ -3768,7 +3768,8 @@ function renderRadar2D(sc) {
   const { panF, panL } = view2d;
   const toS = (x, y) => [cx - (y - panL) * scale, y0 - (x - panF) * scale];
   const latMax = (width - padL - padR) / 2 / scale;
-  const step = niceGridStep(R + Rr);
+  // 눈금 간격이 화면에서 18px 이상 되도록 (패널이 낮을 때 거리 글자 겹침 방지)
+  const step = niceGridStep((R + Rr) * Math.max(1, 180 / plotH));
   radar2dMap = { cx, y0, scale, padT, plotH, step };
   const fmt = (v) => (step < 1 ? v.toFixed(1) : Math.round(v)) + ' m';
 
