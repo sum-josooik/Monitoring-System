@@ -946,6 +946,7 @@ class MonitorNode(Node):
                 'yaw': round(yaw_from_quaternion(bbox.center.orientation), 3),
                 'label': label,
                 'kind': 'detection',
+                'id': str(getattr(detection, 'id', '') or index),
             })
         with self.lock:
             self.visual_boxes[topic] = {'stamp': _now(), 'items': boxes}
@@ -1975,6 +1976,8 @@ def marker_to_visual(topic, marker):
             'label': marker.text or marker.ns or topic.rsplit('/', 1)[-1],
             'kind': kind,
             'color': color,
+            'id': int(marker.id),
+            'ns': marker.ns,
         })
     if marker.points:
         points = [[round(float(p.x), 2), round(float(p.y), 2), round(float(p.z), 2)] for p in marker.points[:500]]

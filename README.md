@@ -15,8 +15,9 @@ ROS 2 노드 하나(`monitor_node`)가 모든 토픽을 구독하고, 내장 HTT
 | **Topic Health** | 전체 토픽의 상태(active / idle / error), 주기(Hz), 마지막 수신 후 경과 시간. 검색, 그룹 필터, 행을 펼쳐 최근 메시지 값 확인 |
 | **센서 그룹** | Cameras · LiDAR · Radar · Localization · Vehicle/CAN · Perception별 활성 토픽 수 요약 |
 | **시스템 (Jetson)** | jtop 기반 CPU 코어별 사용률, GPU, 메모리, 온도, HW 엔진, 전원 모드 |
-| **Camera Preview** | `Image` / `CompressedImage` 토픽을 MJPEG로 미리보기. 슬롯 추가, 삭제, 순서 변경, 열 수 조절. 상태 배지: `LIVE` / `WAIT` / `NO SIGNAL`(3초 이상 프레임 없음) |
+| **Camera Preview** | `Image` / `CompressedImage` 토픽을 MJPEG로 미리보기. 슬롯 추가, 삭제, 순서 변경, 열 수 조절. 상태 배지: `LIVE` / `WAIT` / `NO SIGNAL`(3초 이상 프레임 없음). 영상을 클릭하면 크게 보기(←/→ 로 카메라 전환, Esc 닫기) |
 | **RViz Monitor** | PointCloud2, MarkerArray, 레이더, 클러스터, 트랙을 브라우저에서 3D로 표시. Top/Front/Left/Right 시점, 레이어 토글, 근접 장애물 경고 배너 |
+| **주행 뷰** (RViz 패널 탭) | **3D 주행**: 자차·트랙 차량 모형, 클러스터 장애물, 레이더 점, 예상 주행 경로(조향각 기반)와 선행 차량(LEAD) 표시. 주행/입체/위에서 시점, 카메라 PIP. **2D 레이더**: 위에서 본 거리 눈금 평면도에 트랙 ID, 레이더 거리, 차로 표시. 하단에 속도·조향·페달·선행 차량 거리. 카메라는 끄기 / 전방 1대 / 전체 / 직접 선택, 배치는 상단 줄 / 차량 둘레(방향별). 설정은 ⚙ → RViz 탭의 '주행 뷰' 섹션. `?vtab=drive3d` / `?vtab=radar2d` 로 바로 열기 |
 | **GPS Map** | `NavSatFix` / `GPSFix` 위치를 Leaflet 지도에 표시. 이동 경로 기록, 저장, 불러오기 |
 | **Vehicle Monitor** | `/acu_ck2_ver2` 기반 기어, 조향, 페달, 바퀴 속도, 배터리, 모터 토크 게이지 |
 | **감지 객체 / 이벤트 로그** | 인식된 객체 목록(유형, 방위, 거리, 크기)과 상태 변화 이벤트 |

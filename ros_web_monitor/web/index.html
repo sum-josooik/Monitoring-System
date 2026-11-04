@@ -98,6 +98,20 @@
           <div class="section-head">
             <button class="drag-handle" type="button" title="drag panel">::</button>
             <div><h2>RViz Monitor</h2><span id="vizStats">drag rotate, wheel zoom</span></div>
+            <nav class="viz-tabs" id="vizTabs">
+              <button data-vtab="rviz" type="button">RViz</button>
+              <button data-vtab="drive3d" type="button">3D 주행</button>
+              <button data-vtab="radar2d" type="button">2D 레이더</button>
+            </nav>
+            <div class="drive-actions">
+              <div class="drive-seg" id="drivePresets">
+                <button data-dpreset="chase" type="button">주행<span class="dp-long"> 시점</span></button>
+                <button data-dpreset="oblique" type="button">입체<span class="dp-long"> 시점</span></button>
+                <button data-dpreset="top" type="button">위에서</button>
+              </div>
+              <button id="driveReset" type="button" title="시점 초기화">↺<span class="dset-btn-txt"> 초기화</span></button>
+              <button id="driveSettingsBtn" type="button" title="주행 뷰 설정 (설정 → RViz)">⚙<span class="dset-btn-txt"> 설정</span></button>
+            </div>
             <div class="viz-actions">
               <button id="zoomOut" type="button">-</button>
               <input id="zoomRange" type="range" min="0.45" max="30.0" step="0.05" value="1">
@@ -107,12 +121,28 @@
               <button class="view-preset" data-view="front" type="button">Front</button>
               <button class="view-preset" data-view="left" type="button">Left</button>
               <button class="view-preset" data-view="right" type="button">Right</button>
+              <button id="vizSettingsBtn" type="button" title="RViz 설정 (설정 → RViz)">⚙</button>
             </div>
           </div>
           <div class="viz-shell">
             <canvas id="vizCanvas"></canvas>
             <div id="vizAlert" class="viz-alert" hidden></div>
 <div class="viz-legend"></div>
+            <div id="driveView" class="drive-view" hidden>
+              <div class="drive-stage">
+                <canvas id="driveCanvas"></canvas>
+                <div class="drive-hud drive-hud-tl"><span id="driveKicker" class="drive-kicker">DRIVING VIEW</span><span id="driveSource" class="drive-src"></span></div>
+                <div class="drive-hud drive-hud-tr"><span id="driveLaneBadge" class="drive-badge"></span></div>
+                <div class="drive-hud drive-hud-bl" id="driveCount"></div>
+                <div class="drive-hud drive-hud-br" id="driveHint"></div>
+              </div>
+              <div class="drive-stats">
+                <div class="ds-item"><span>차량 속도</span><b id="dsSpeed">—</b></div>
+                <div class="ds-item"><span>스티어링</span><b id="dsSteer">—</b></div>
+                <div class="ds-item"><span>페달 상태</span><b id="dsPedal">—</b></div>
+                <div class="ds-item"><span>선행 차량</span><b id="dsLead">—</b></div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -182,6 +212,22 @@
       </section>
     </main>
 
+    <!-- 카메라 확대 보기 -->
+    <div id="camZoom" class="cam-zoom" hidden>
+      <div class="cam-zoom-inner">
+        <div class="cam-zoom-head">
+          <b id="camZoomTitle"></b><span id="camZoomMeta"></span>
+          <div class="cam-zoom-nav">
+            <span id="camZoomIdx"></span>
+            <button id="camZoomPrev" type="button" title="이전 카메라 (←)">‹</button>
+            <button id="camZoomNext" type="button" title="다음 카메라 (→)">›</button>
+            <button id="camZoomClose" type="button" title="닫기 (Esc)">×</button>
+          </div>
+        </div>
+        <canvas id="camZoomCanvas"></canvas>
+      </div>
+    </div>
+
     <!-- 통합 설정 Modal (화면 구성 / Bag / RViz / 백업) -->
     <div id="bagOverlay" class="vsm-overlay" hidden></div>
     <div id="bagModal" class="vsm-modal" hidden>
@@ -234,6 +280,44 @@
             <section class="vsm-section">
               <div class="vsm-section-title">레이어 설정 <span class="vsm-hint">— 레이어별 이름·색상·토픽 지정, ＋로 추가</span></div>
               <div id="vsmLayerConfig" class="vsm-layer-config"></div>
+            </section>
+            <section class="vsm-section" id="vsmDriveSection">
+              <div class="vsm-section-title">주행 뷰 <span class="vsm-hint">— RViz 패널의 3D 주행 · 2D 레이더 탭</span></div>
+              <div class="dset-group">
+                <label><input type="checkbox" data-dset="tracks"> 차량 트랙</label>
+                <label><input type="checkbox" data-dset="clusters"> 클러스터 장애물</label>
+                <label><input type="checkbox" data-dset="radar"> 레이더 점</label>
+                <label><input type="checkbox" data-dset="lidar"> LiDAR 점</label>
+                <label><input type="checkbox" data-dset="path"> 예상 주행 경로</label>
+              </div>
+              <div class="vsm-row">
+                <label class="vsm-field"><span>전방 표시 거리 <b id="dsetRangeVal"></b></span><input type="range" min="30" max="150" step="10" data-dset="range"></label>
+                <label class="vsm-field"><span>차로 폭 (m)</span><input type="number" min="2.5" max="5" step="0.1" data-dset="laneWidth"></label>
+                <label class="vsm-field"><span>조향비</span><input type="number" min="8" max="25" step="0.5" data-dset="steerRatio"></label>
+                <label class="vsm-field"><span>축거 (m)</span><input type="number" min="1.5" max="6" step="0.1" data-dset="wheelbase"></label>
+              </div>
+              <p class="set-hint">차선 인식 토픽(이름에 lane)이 없으면 조향각·조향비·축거로 계산한 예상 경로를 차로로 그립니다.</p>
+            </section>
+            <section class="vsm-section">
+              <div class="vsm-section-title">주행 뷰 카메라 <span class="vsm-hint">— 영상 위를 클릭하면 크게 보기</span></div>
+              <div class="vsm-row">
+                <label class="vsm-field"><span>카메라 표시</span>
+                  <select data-dset="camMode">
+                    <option value="off">표시 안 함</option>
+                    <option value="auto">전방 1대 (자동)</option>
+                    <option value="all">전체 카메라</option>
+                    <option value="select">직접 선택</option>
+                  </select>
+                </label>
+                <label class="vsm-field"><span>배치</span>
+                  <select data-dset="camLayout">
+                    <option value="strip">상단 한 줄</option>
+                    <option value="surround">차량 둘레 (방향별)</option>
+                  </select>
+                </label>
+              </div>
+              <div id="dsetCamList" class="dset-cam-list"></div>
+              <p class="set-hint">Camera Preview 슬롯에 열려 있는 카메라 영상을 재사용합니다(브라우저 연결 추가 없음). 슬롯에 없는 카메라는 표시되지 않습니다. 차량 둘레 배치는 토픽 이름(Front / Left / Right / Rear / avm)으로 위치를 정합니다.</p>
             </section>
           </div>
 

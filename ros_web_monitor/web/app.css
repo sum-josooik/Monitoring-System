@@ -2050,3 +2050,165 @@ td.topic { font-weight: 600; font-family: "JetBrains Mono", ui-monospace, Menlo,
   display: grid; place-items: center; pointer-events: none;
   color: var(--muted); font-size: 12px; font-weight: 600;
 }
+
+/* ── 주행 뷰 (RViz 패널 탭: 3D 주행 / 2D 레이더) ── */
+.viz-tabs {
+  display: inline-flex; gap: 2px; padding: 3px; margin: 0 auto 0 14px;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(8,13,19,.7);
+}
+.viz-tabs button, .drive-seg button {
+  height: 28px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted); font-weight: 600; font-size: 12.5px; cursor: pointer;
+}
+.viz-tabs button:hover, .drive-seg button:hover { color: var(--text); }
+.viz-tabs button.active, .drive-seg button.active {
+  background: linear-gradient(135deg, rgba(56,189,248,.28), rgba(129,140,248,.22));
+  color: #e6f4ff; box-shadow: inset 0 0 0 1px rgba(56,189,248,.35);
+}
+.drive-actions { display: none; gap: 6px; align-items: center; }
+.drive-seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(8,13,19,.7); }
+.drive-actions > button { height: 30px; padding: 0 11px; border-radius: 8px; font-size: 12.5px; }
+.drive-actions > button.active { border-color: var(--accent); color: var(--accent); }
+
+.viz-panel[data-vtab="drive3d"] .viz-actions,
+.viz-panel[data-vtab="radar2d"] .viz-actions { display: none; }
+.viz-panel[data-vtab="drive3d"] .drive-actions,
+.viz-panel[data-vtab="radar2d"] .drive-actions { display: flex; }
+.viz-panel[data-vtab="radar2d"] .drive-seg { display: none; }
+.viz-panel[data-vtab="drive3d"] #vizCanvas, .viz-panel[data-vtab="radar2d"] #vizCanvas,
+.viz-panel[data-vtab="drive3d"] .viz-legend, .viz-panel[data-vtab="radar2d"] .viz-legend,
+.viz-panel[data-vtab="drive3d"] #vizAlert, .viz-panel[data-vtab="radar2d"] #vizAlert { display: none !important; }
+
+.drive-view { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+.drive-view[hidden] { display: none; }
+.drive-stage {
+  position: relative; flex: 1; min-height: 0; overflow: hidden;
+  border: 1px solid var(--line-strong); border-radius: 12px; background: #070b10;
+}
+#driveCanvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+#driveCanvas:active { cursor: grabbing; }
+.viz-panel[data-vtab="radar2d"] #driveCanvas { cursor: default; }
+
+.drive-hud { position: absolute; display: flex; align-items: center; gap: 8px; pointer-events: none; font-size: 12px; color: var(--muted); }
+.drive-hud-tl { top: 14px; left: 16px; }
+.drive-hud-tr { top: 12px; right: 14px; }
+.drive-hud-bl { bottom: 12px; left: 16px; color: var(--text); }
+.drive-hud-br { bottom: 12px; right: 16px; }
+.drive-kicker { color: #7cc4ff; font-size: 11.5px; font-weight: 600; letter-spacing: .16em; }
+.drive-src { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--green); background: rgba(61,220,151,.12); border: 1px solid rgba(61,220,151,.3); }
+.drive-src.play { color: var(--yellow); background: rgba(255,192,77,.12); border-color: rgba(255,192,77,.3); }
+.drive-badge { padding: 6px 12px; border-radius: 8px; color: var(--text); font-weight: 600; background: rgba(10,16,24,.8); border: 1px solid var(--line-strong); backdrop-filter: blur(6px); }
+.drive-badge[hidden] { display: none; }
+
+.drive-stats {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); flex: 0 0 auto;
+  border: 1px solid var(--line-strong); border-radius: 12px;
+  background: linear-gradient(180deg, rgba(30,46,66,.55), rgba(16,24,34,.7));
+}
+.ds-item { display: flex; flex-direction: column; gap: 4px; padding: 9px 16px; min-width: 0; }
+.ds-item + .ds-item { border-left: 1px solid var(--line-strong); }
+.ds-item > span { color: var(--muted); font-size: 11.5px; }
+.ds-item > b { font-size: 17px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ds-item > b small { font-size: 12px; font-weight: 500; color: var(--muted); }
+.ds-gear { font-style: normal; font-size: 11px; padding: 1px 6px; margin-left: 4px; border-radius: 5px; color: var(--accent); border: 1px solid rgba(56,189,248,.4); vertical-align: 2px; }
+.ds-item > b.ds-brake { color: var(--red); }
+.ds-item > b.ds-accel, .ds-item > b.ds-lead { color: var(--green); }
+
+.dset-group { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+.dset-group .dset-lbl { grid-column: 1 / -1; }
+.dset-group label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.dset-lbl { color: var(--muted); font-size: 11.5px; }
+.dset-lbl b { color: var(--text); font-weight: 600; }
+
+@media (max-width: 900px) {
+  .viz-tabs { margin-left: 0; }
+  .drive-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ds-item:nth-child(3) { border-left: 0; }
+}
+
+/* ── RViz 패널 헤더: 좁은 폭에서도 제목이 세로로 깨지지 않게 ──
+   제목은 줄바꿈 금지, 버튼 묶음은 폭에 따라 줄이거나 다음 줄로 넘김 */
+.viz-panel { container: vizp / inline-size; }
+.viz-panel .section-head { flex-wrap: wrap; row-gap: 6px; column-gap: 8px; }
+.viz-panel .section-head > div:first-of-type { flex: 1 1 110px; min-width: 110px; }
+.viz-panel .section-head h2 { white-space: nowrap; }
+.viz-panel #vizStats { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.viz-panel .viz-tabs { margin: 0; flex: 0 0 auto; }
+.viz-panel .viz-actions, .viz-panel .drive-actions { flex: 0 0 auto; flex-wrap: nowrap; }
+.viz-panel .viz-actions button { padding: 0 9px; }
+@container vizp (max-width: 1000px) {
+  .viz-panel .viz-actions input[type=range] { width: 80px; }
+  .viz-tabs button, .drive-seg button { padding: 0 9px; }
+}
+@container vizp (max-width: 860px) {
+  .viz-panel .viz-actions input[type=range],
+  .viz-panel .viz-actions .view-preset[data-view="left"],
+  .viz-panel .viz-actions .view-preset[data-view="right"] { display: none; }
+  .drive-actions > button { padding: 0 8px; }
+  .drive-actions .dset-btn-txt { display: none; }
+}
+@container vizp (max-width: 620px) {
+  .viz-panel #vizStats { display: none; }
+  .drive-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ds-item:nth-child(3) { border-left: 0; }
+  .ds-item { padding: 6px 12px; }
+  .ds-item > b { font-size: 15px; }
+}
+/* 높이가 낮은 패널: 하단 정보 줄을 한 줄로 압축 */
+.drive-view { container: drivev / size; }
+@container drivev (max-height: 380px) {
+  .drive-view { gap: 6px; padding: 6px; }
+  .ds-item { gap: 1px; padding: 5px 12px; }
+  .ds-item > span { font-size: 10.5px; }
+  .ds-item > b { font-size: 14px; }
+  .drive-hud-tl { top: 10px; } .drive-hud-tr { top: 8px; }
+  .drive-badge { padding: 4px 9px; font-size: 11.5px; }
+}
+.drive-actions .dset-btn-txt, .drive-actions .dp-long { color: inherit; font-size: inherit; }
+@container vizp (max-width: 860px) { .drive-actions .dp-long { display: none; } }
+
+/* ── 주행 뷰 설정 (설정 창 → RViz) ── */
+#vsmDriveSection .dset-group { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 4px 0 6px; font-size: 12.5px; }
+#vsmDriveSection .vsm-field input[type=number] { width: 90px; height: 30px; }
+#vsmDriveSection .vsm-field input[type=range] { width: 170px; accent-color: var(--accent); }
+.dset-cam-list {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px;
+  margin: 10px 0 8px; padding: 8px 10px; max-height: 190px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: rgba(8,13,19,.5);
+}
+.dset-cam-list.disabled { opacity: .45; }
+.dset-cam { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; cursor: pointer; }
+.dset-cam span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; }
+.dset-cam em { flex: 0 0 auto; font-style: normal; font-size: 10px; color: var(--yellow); }
+.dset-cam.off-grid span { color: var(--muted); }
+#vizSettingsBtn { font-size: 14px; padding: 0 9px; color: var(--muted); }
+#vizSettingsBtn:hover { color: var(--accent); }
+
+/* ── 카메라 확대 보기 ── */
+.camera-card img { cursor: zoom-in; }
+.camera-panel.cam-editing .camera-card img { cursor: default; }
+.cam-zoom {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+  padding: 3vh 3vw; background: rgba(2,5,9,.78); backdrop-filter: blur(6px);
+}
+.cam-zoom[hidden] { display: none; }
+.cam-zoom-inner {
+  display: flex; flex-direction: column; width: min(94vw, 1600px); height: min(90vh, 1000px);
+  border: 1px solid var(--line-strong); border-radius: 14px; overflow: hidden;
+  background: #05080c; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+.cam-zoom-head {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  border-bottom: 1px solid var(--line); background: rgba(16,23,32,.9);
+}
+.cam-zoom-head b { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cam-zoom-head > span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.cam-zoom-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.cam-zoom-nav span { color: var(--muted); font-size: 12px; margin-right: 4px; }
+.cam-zoom-nav button { width: 34px; height: 32px; padding: 0; border-radius: 8px; font-size: 18px; }
+#camZoomCanvas { flex: 1; min-height: 0; width: 100%; display: block; }
+#setPanelRviz .dset-group label, .dset-cam { justify-content: flex-start; }
+#setPanelRviz .dset-group input[type=checkbox], .dset-cam input[type=checkbox] {
+  flex: 0 0 auto; width: 16px; height: 16px; min-width: 0; margin: 0; padding: 0; accent-color: var(--accent);
+}
+.dset-cam span { flex: 1 1 auto; text-align: left; }
