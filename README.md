@@ -4,7 +4,7 @@ ROS 2 차량의 센서, 인식 결과, 시스템 상태를 브라우저 한 화�
 ROS 2 노드 하나(`monitor_node`)가 모든 토픽을 구독하고, 내장 HTTP 서버로 대시보드를 제공합니다.
 별도 웹 서버나 Node.js는 필요 없습니다.
 
-![ROS Web Monitor](docs/screenshot.jpg)
+![ROS Web Monitor](docs/screenshot_20261104.jpg)
 
 *실차 주행 환경 화면 (2026-11-04): GMSL 카메라 8대 + AVM, 9대 병합 LiDAR와 클러스터·트랙, GNSS 위치(위성 27개)*
 
@@ -123,7 +123,7 @@ ros_web_monitor/
 │   └── web/                 # 프런트엔드 (index.html, app.js, app.css)
 ├── launch/monitor.launch.py
 ├── UI/                      # 기본 화면 설정 JSON (자동 적용)
-├── docs/screenshot.jpg
+├── docs/screenshot_20261104.jpg
 ├── log/gps/                 # GPS 이동 경로 저장 (git 제외)
 ├── package.xml
 └── setup.py
