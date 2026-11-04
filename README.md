@@ -6,7 +6,7 @@ ROS 2 노드 하나(`monitor_node`)가 모든 토픽을 구독하고, 내장 HTT
 
 ![ROS Web Monitor](docs/screenshot.jpg)
 
-*실차 주행 환경 화면 (2026-11-04): GMSL 카메라 8대 + AVM, 9대 병합 LiDAR와 클러스터·트랙, GNSS 위치(위성 32개)*
+*실차 주행 환경 화면 (2026-11-04): GMSL 카메라 8대 + AVM, 9대 병합 LiDAR와 클러스터·트랙, GNSS 위치(위성 27개)*
 
 ## 주요 기능
 
