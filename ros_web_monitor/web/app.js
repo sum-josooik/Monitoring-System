@@ -98,6 +98,32 @@ const view = {
   rightRowsBeforeEdit: '',
 };
 
+// ── 차량 기하 (데이터 좌표계 = multi_lidar_merge output_frame) ──
+// 이 차량은 전방이 +y, 좌측이 -x (Front_Top Ouster y≈+3.6~4.9, Rear_Top y=-2.3).
+// 기본 차체 = remove_vehicle CropBox (x -1.3~1.7, y -2.5~5.7). 설정 → RViz → '차량 위치'에서 변경.
+const VEHICLE_DEFAULTS = { forward: '+y', cx: 0.2, cy: 1.6, length: 8.2, width: 3.0, height: 2.6 };
+const vehicleGeom = (() => {
+  try { return { ...VEHICLE_DEFAULTS, ...(JSON.parse(localStorage.getItem('rosWebVehicleGeom') || 'null') || {}) }; }
+  catch (_) { return { ...VEHICLE_DEFAULTS }; }
+})();
+function vehHeading() { return { '+x': 0, '+y': Math.PI / 2, '-x': Math.PI, '-y': -Math.PI / 2 }[vehicleGeom.forward] ?? Math.PI / 2; }
+// 데이터 좌표 (x, y) → 차량 중심 기준 [전방, 좌측]
+function toVeh(x, y) {
+  const h = vehHeading(), c = Math.cos(h), sn = Math.sin(h);
+  const dx = x - vehicleGeom.cx, dy = y - vehicleGeom.cy;
+  return [c * dx + sn * dy, -sn * dx + c * dy];
+}
+// 차체 모서리까지의 거리 (차체 안이면 0)
+function vehEdgeDist(x, y) {
+  const [f, l] = toVeh(x, y);
+  return Math.hypot(Math.max(0, Math.abs(f) - vehicleGeom.length / 2), Math.max(0, Math.abs(l) - vehicleGeom.width / 2));
+}
+function insideVehicle(x, y) {
+  const [f, l] = toVeh(x, y);
+  return Math.abs(f) <= vehicleGeom.length / 2 && Math.abs(l) <= vehicleGeom.width / 2;
+}
+view.yaw = -vehHeading();   // 차량 전방이 화면 위쪽
+
 const $ = (id) => document.querySelector(id);
 const dashboard = $('#dashboard');
 const topicCount = $('#topicCount');
@@ -138,6 +164,11 @@ let bagPlayBaseLabel = 'Play';  // 헤더 설정에서 변경 가능한 Play 버
 function isPlayTopic(name) {
   const ns = state.playNamespace || '/bagplay';
   return typeof name === 'string' && name.startsWith(ns + '/');
+}
+// /bagplay/<토픽> → <토픽> (설정에는 실시간 이름으로 저장하고, 쓸 때 effectiveTopic 으로 변환)
+function logicalTopic(name) {
+  const ns = state.playNamespace || '/bagplay';
+  return isPlayTopic(name) ? name.slice(ns.length) : name;
 }
 function effectiveTopic(topic) {
   if (!topic) return topic;
@@ -541,7 +572,7 @@ async function toggleBag() {
       res = await fetch('/api/bag/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ all: !!cfg.all, topics: cfg.all ? [] : (cfg.topics || []) }),
+        body: JSON.stringify({ all: !!cfg.all, topics: cfg.all ? [] : (cfg.topics || []), light: cfg.light !== false }),
       });
     }
     const data = await res.json();
@@ -587,7 +618,9 @@ function openSettingsModal() {
   // Bag 탭 상태
   const recording = !!(state.bag && state.bag.recording);
   const bagBusy = recording || !!(state.bagPlay && (state.bagPlay.playing || state.bagPlay.starting));
-  bagEdit = { all: !!view.bagConfig.all, topics: new Set(view.bagConfig.topics || []) };
+  bagEdit = { all: !!view.bagConfig.all, topics: new Set(view.bagConfig.topics || []), light: view.bagConfig.light !== false };
+  document.getElementById('bagLight').checked = bagEdit.light;
+  document.getElementById('bagLight').disabled = recording;
   document.getElementById('bagAll').checked = bagEdit.all;
   document.getElementById('bagAll').disabled = recording;
   document.getElementById('bagTopicSearch').value = '';
@@ -824,7 +857,7 @@ function closeSettingsModal(save) {
   document.getElementById('bagModal').hidden = true;
   if (save) {
     if (bagEdit) {
-      view.bagConfig = { all: bagEdit.all, topics: [...bagEdit.topics] };
+      view.bagConfig = { all: bagEdit.all, topics: [...bagEdit.topics], light: document.getElementById('bagLight').checked };
       localStorage.setItem('rosWebBagConfig', JSON.stringify(view.bagConfig));
       saveBagDir();
     }
@@ -853,19 +886,65 @@ function closeSettingsModal(save) {
   vsmEdit = null;
 }
 
-function renderVisualization() {
-  if (view.vizTab && view.vizTab !== 'rviz') { renderDriveView(); return; }
-  const viz = state.visualization;
+// ── RViz 탭 렌더러 ──
+// 좌표: x=전방, y=좌측, z=위. project3D() 는 view.yaw/pitch/zoom/pan 기반 원근 투영.
+// 점 색상 모드(view.vizColorMode): layer(레이어 색) | height(높이 색상맵) | range(거리 색상맵)
+const VIZ_COLORMAP = ['#3b4cc0', '#2c7bd6', '#17b2e0', '#2fd3b4', '#7fe36a', '#d6e04a', '#fbb13c', '#f36b3b', '#d93a5b'];
+const VIZ_BINS = 24;
+const VIZ_KIND_COLOR = { track: '#3ddc97', object: '#ff5d6c', detection: '#ff5d6c', radar: '#ffc04d', marker: '#c084fc' };
+view.vizColorMode = localStorage.getItem('rosWebVizColorMode') || 'height';
+view.vizLabels = localStorage.getItem('rosWebVizLabels') !== 'off';
+let vizHits = [];          // 툴팁용: [{x, y, box, color}]
+let vizMouse = null;       // 캔버스 내 마우스 좌표
+let vizFrameTimes = [];    // 초당 갱신 횟수 계산
+
+const vizBinColors = (() => {
+  const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const stops = VIZ_COLORMAP.map(hex);
+  return Array.from({ length: VIZ_BINS }, (_, i) => {
+    const t = i / (VIZ_BINS - 1) * (stops.length - 1);
+    const a = stops[Math.floor(t)], b = stops[Math.min(stops.length - 1, Math.floor(t) + 1)], f = t - Math.floor(t);
+    return `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(',')})`;
+  });
+})();
+
+// 표시할 포인트 레이어 목록. 병합 클라우드(merge_output) 레이어에 데이터가 없으면
+// (예: 녹화가 밀려 bag 에 병합 클라우드가 거의 없는 경우) 백엔드가 병합 좌표계로 변환한
+// 개별 라이다(merge_part)를 대신 그 레이어 색으로 표시한다.
+function vizPointLayers(viz, topicToLayer) {
+  const out = [];
+  for (const layer of viz.point_layers || []) {
+    const lyr = topicToLayer[layer.topic];
+    if (lyr) out.push({ ...layer, lyr });
+  }
+  const merged = viz.merge_output ? topicToLayer[effectiveTopic(viz.merge_output)] : null;
+  if (merged && !out.some((l) => l.lyr === merged)) {
+    const inPlay = view.mode === 'play';
+    for (const layer of viz.point_layers || []) {
+      if (layer.merge_part && isPlayTopic(layer.topic) === inPlay && !topicToLayer[layer.topic]) out.push({ ...layer, lyr: merged, fallback: true });
+    }
+  }
+  return out;
+}
+
+function sizeVizCanvas() {
   const rect = vizCanvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const width = Math.max(320, Math.floor(rect.width));
-  const height = Math.max(320, Math.floor(rect.height));
+  const height = Math.max(240, Math.floor(rect.height));
   if (vizCanvas.width !== Math.floor(width * dpr) || vizCanvas.height !== Math.floor(height * dpr)) {
     vizCanvas.width = Math.floor(width * dpr);
     vizCanvas.height = Math.floor(height * dpr);
   }
   vizCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  vizCtx.clearRect(0, 0, width, height);
+  return { width, height };
+}
+
+function renderVisualization() {
+  if (view.vizTab && view.vizTab !== 'rviz') { renderDriveView(); return; }
+  const viz = state.visualization;
+  const { width, height } = sizeVizCanvas();
+  drawVizBackground(width, height);
   drawGrid3D(width, height);
 
   const topicToLayer = {};
@@ -874,20 +953,35 @@ function renderVisualization() {
     if (lyr.topic && lyr.visible) topicToLayer[effectiveTopic(lyr.topic)] = lyr;
   }
 
-  // 1) 포인트: 깊이 정렬 없이 레이어별로 한 번에 그림(점은 z-order 무의미) — 가장 큰 최적화
+  // 1) 포인트: 색상 구간별로 모아 한 번에 칠함 (fillStyle 변경 최소화), 'lighter' 합성으로 은은한 발광
   let pointCount = 0;
-  for (const layer of viz.point_layers || []) {
-    const lyr = topicToLayer[layer.topic];
-    if (!lyr) continue;
-    vizCtx.fillStyle = lyr.color;
+  const range = Math.max(10, state.visualization.range_m || 80);
+  vizCtx.globalCompositeOperation = 'lighter';
+  for (const layer of vizPointLayers(viz, topicToLayer)) {
+    const lyr = layer.lyr;
+    const mode = view.vizColorMode;
+    const bins = mode === 'layer' ? null : Array.from({ length: VIZ_BINS }, () => []);
+    if (!bins) vizCtx.fillStyle = lyr.color;
+    vizCtx.globalAlpha = 0.85;
     for (const p of layer.points || []) {
       const pr = project3D(p[0], p[1], p[2] || 0, width, height);
       if (!pr.visible) continue;
-      const size = Math.max(1, Math.min(3, pr.scale * 0.018));
-      vizCtx.fillRect(pr.x, pr.y, size, size);
+      const size = Math.max(1.2, Math.min(3.2, pr.scale * 0.02));
       pointCount += 1;
+      if (!bins) { vizCtx.fillRect(pr.x - size / 2, pr.y - size / 2, size, size); continue; }
+      const t = mode === 'height' ? ((p[2] || 0) + 2) / 6 : Math.hypot(p[0], p[1]) / Math.min(range, 60);
+      bins[Math.max(0, Math.min(VIZ_BINS - 1, Math.floor(t * VIZ_BINS)))].push(pr.x - size / 2, pr.y - size / 2, size);
+    }
+    if (bins) {
+      bins.forEach((arr, i) => {
+        if (!arr.length) return;
+        vizCtx.fillStyle = vizBinColors[i];
+        for (let k = 0; k < arr.length; k += 3) vizCtx.fillRect(arr[k], arr[k + 1], arr[k + 2], arr[k + 2]);
+      });
     }
   }
+  vizCtx.globalAlpha = 1;
+  vizCtx.globalCompositeOperation = 'source-over';
 
   // 2) 박스/마커만 깊이 정렬(소수) 후 그림
   const items = [];
@@ -904,12 +998,28 @@ function renderVisualization() {
   items.sort((a, b) => b.depth - a.depth);
   let boxes = 0;
   let markers = 0;
+  vizHits = [];
+  const labels = [];
   for (const item of items) {
     if (item.type === 'marker') { markers += draw3DMarker(item.marker, item.color, width, height); }
-    else if (item.type === 'box') { boxes += draw3DBox(item.box, item.color, width, height); }
+    else if (item.type === 'box') { boxes += draw3DBox(item.box, item.color, width, height, labels); }
   }
   drawEgo3D(width, height);
-  vizStats.textContent = `${pointCount} points, ${boxes} boxes, ${markers} markers, yaw ${(view.yaw * 180 / Math.PI).toFixed(0)} deg`;
+  if (view.vizLabels) drawVizLabels(labels);
+  drawVizGizmo(width, height);
+  drawVizScaleBar(width, height);
+  updateVizTooltip();
+
+  const now = performance.now();
+  vizFrameTimes.push(now);
+  while (vizFrameTimes.length && now - vizFrameTimes[0] > 1000) vizFrameTimes.shift();
+  vizStats.textContent = `점 ${pointCount.toLocaleString()} · 박스 ${boxes} · 마커 ${markers} · 갱신 ${vizFrameTimes.length}/s`;
+  const src = document.getElementById('vizSrc');
+  if (src) {
+    const veh = driveVehicleState();
+    src.textContent = (view.mode === 'play' ? 'Play' : '실시간') + (veh ? ` · ${Math.abs(veh.speed).toFixed(1)} km/h${veh.source === 'gps' ? ' (GPS)' : ''}` : '');
+    src.classList.toggle('play', view.mode === 'play');
+  }
 }
 
 function project3D(x, y, z, width, height) {
@@ -925,43 +1035,94 @@ function project3D(x, y, z, width, height) {
   return { x: width / 2 - side * scale + view.panX, y: height * 0.55 - screenYWorld * scale + view.panY, scale, depth, visible: depth > 4 };
 }
 
-function drawGrid3D(width, height) {
-  vizCtx.fillStyle = '#07090b';
+function drawVizBackground(width, height) {
+  const bg = vizCtx.createRadialGradient(width / 2, height * 0.55, 20, width / 2, height * 0.55, Math.max(width, height) * 0.75);
+  bg.addColorStop(0, '#0b1724');
+  bg.addColorStop(0.6, '#070d15');
+  bg.addColorStop(1, '#04070b');
+  vizCtx.fillStyle = bg;
   vizCtx.fillRect(0, 0, width, height);
+}
+
+function drawGrid3D(width, height) {
   const range = Math.max(30, Math.min(200, state.visualization.range_m || 80));
   const step = range <= 50 ? 5 : range <= 120 ? 10 : 20;
   vizCtx.lineWidth = 1;
+  // 격자: 멀수록 옅게
   for (let v = -range; v <= range; v += step) {
+    const fade = 1 - Math.abs(v) / range;
     const major = v === 0;
-    vizCtx.strokeStyle = major ? '#42505c' : '#1e2830';
+    vizCtx.strokeStyle = major ? 'rgba(120,170,220,0.32)' : `rgba(120,170,220,${(0.05 + fade * 0.09).toFixed(3)})`;
     drawWorldLine(-range, v, 0, range, v, 0, width, height);
     drawWorldLine(v, -range, 0, v, range, 0, width, height);
   }
-  vizCtx.fillStyle = '#81909e';
-  vizCtx.font = '12px system-ui, sans-serif';
-  drawAxis(width, height);
-  vizCtx.fillText('드래그: 회전 · 휠클릭+드래그: 이동 · 휠: 확대', 12, height - 14);
+  // 거리 링 + 라벨
+  const rings = [5, 10, 20, 30, 50, 70, 100, 150, 200].filter((r) => r <= range && (range <= 60 || r >= 10));
+  vizCtx.font = '500 11px "Pretendard Variable", Pretendard, system-ui, sans-serif';
+  for (const r of rings) {
+    vizCtx.strokeStyle = r === rings[rings.length - 1] ? 'rgba(56,189,248,0.30)' : 'rgba(56,189,248,0.16)';
+    vizCtx.setLineDash(r <= 10 ? [] : [4, 6]);
+    vizCtx.beginPath();
+    let started = false;
+    for (let i = 0; i <= 96; i++) {
+      const a = i / 96 * Math.PI * 2;
+      const p = project3D(vehicleGeom.cx + Math.cos(a) * r, vehicleGeom.cy + Math.sin(a) * r, 0, width, height);
+      if (!p.visible) { started = false; continue; }
+      if (!started) { vizCtx.moveTo(p.x, p.y); started = true; } else vizCtx.lineTo(p.x, p.y);
+    }
+    vizCtx.stroke();
+    const la = vehHeading() - 0.35;
+    const lp = project3D(vehicleGeom.cx + Math.cos(la) * r, vehicleGeom.cy + Math.sin(la) * r, 0, width, height);
+    if (lp.visible && lp.x > 0 && lp.x < width && lp.y > 0 && lp.y < height) {
+      vizCtx.fillStyle = 'rgba(125,196,255,0.75)';
+      vizCtx.fillText(`${r} m`, lp.x + 3, lp.y - 3);
+    }
+  }
+  vizCtx.setLineDash([]);
 }
 
-function drawAxis(width, height) {
-  const axes = [
-    [[0, 0, 0], [12, 0, 0], '#f16e78', 'X'],
-    [[0, 0, 0], [0, 12, 0], '#56d38b', 'Y'],
-    [[0, 0, 0], [0, 0, 5], '#64c8ff', 'Z'],
-  ];
-  for (const [a, b, color, label] of axes) {
-    const pa = project3D(a[0], a[1], a[2], width, height);
-    const pb = project3D(b[0], b[1], b[2], width, height);
-    if (!pa.visible || !pb.visible) continue;
+// 화면 오른쪽 아래 방향 표시 (X=전방 빨강, Y=좌측 초록, Z=위 파랑)
+function drawVizGizmo(width, height) {
+  const cx = width - 46, cy = height - 54, L = 24;
+  const cyw = Math.cos(view.yaw), syw = Math.sin(view.yaw), sp = Math.sin(view.pitch), cp = Math.cos(view.pitch);
+  const dir = (x, y, z) => {
+    const forward = cyw * x - syw * y, side = syw * x + cyw * y;
+    return [-side, -(forward * sp + z * cp)];
+  };
+  vizCtx.fillStyle = 'rgba(8,12,18,0.7)';
+  vizCtx.strokeStyle = 'rgba(120,170,220,0.25)';
+  vizCtx.beginPath(); vizCtx.arc(cx, cy, L + 12, 0, Math.PI * 2); vizCtx.fill(); vizCtx.stroke();
+  const axes = [[[1, 0, 0], '#ff5d6c', 'X'], [[0, 1, 0], '#3ddc97', 'Y'], [[0, 0, 1], '#38bdf8', 'Z']];
+  vizCtx.font = '700 10px "Pretendard Variable", Pretendard, system-ui, sans-serif';
+  vizCtx.lineWidth = 2.2;
+  for (const [v, color, label] of axes) {
+    const [dx, dy] = dir(...v);
     vizCtx.strokeStyle = color;
-    vizCtx.lineWidth = 2;
-    vizCtx.beginPath();
-    vizCtx.moveTo(pa.x, pa.y);
-    vizCtx.lineTo(pb.x, pb.y);
-    vizCtx.stroke();
+    vizCtx.beginPath(); vizCtx.moveTo(cx, cy); vizCtx.lineTo(cx + dx * L, cy + dy * L); vizCtx.stroke();
     vizCtx.fillStyle = color;
-    vizCtx.fillText(label, pb.x + 4, pb.y + 4);
+    vizCtx.fillText(label, cx + dx * (L + 6) - 3, cy + dy * (L + 6) + 3);
   }
+}
+
+// 축척 막대: 자차 위치의 화면 배율로 1·2·5 단위 길이 표시
+function drawVizScaleBar(width, height) {
+  const p = project3D(0, 0, 0, width, height);
+  if (!p.visible) return;
+  const target = 90;
+  const raw = target / p.scale;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const m = raw / pow;
+  const len = (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * pow;
+  const px = len * p.scale;
+  const x1 = width - 100 - px, y = height - 18;
+  vizCtx.strokeStyle = 'rgba(232,238,245,0.7)';
+  vizCtx.lineWidth = 1.5;
+  vizCtx.beginPath();
+  vizCtx.moveTo(x1, y - 5); vizCtx.lineTo(x1, y); vizCtx.lineTo(x1 + px, y); vizCtx.lineTo(x1 + px, y - 5);
+  vizCtx.stroke();
+  vizCtx.fillStyle = 'rgba(232,238,245,0.8)';
+  vizCtx.font = '500 11px "Pretendard Variable", Pretendard, system-ui, sans-serif';
+  vizCtx.fillText(`${len >= 1 ? len : len.toFixed(1)} m`, x1 + px / 2 - 12, y - 8);
 }
 
 function drawWorldLine(x1, y1, z1, x2, y2, z2, width, height) {
@@ -974,106 +1135,192 @@ function drawWorldLine(x1, y1, z1, x2, y2, z2, width, height) {
   vizCtx.stroke();
 }
 
-function draw3DPoint(item) {
-  vizCtx.fillStyle = item.color;
-  const size = Math.max(1, Math.min(3, item.p.scale * 0.018));
-  vizCtx.fillRect(item.p.x, item.p.y, size, size);
-}
-
 function draw3DMarker(marker, color, width, height) {
   const points = marker.points || [];
   if (!points.length) return 0;
   vizCtx.strokeStyle = color;
   vizCtx.fillStyle = color;
-  vizCtx.lineWidth = 1.6;
   if ([4, 5].includes(marker.type)) {
-    vizCtx.beginPath();
-    let started = false;
-    points.forEach((point, index) => {
-      const p = project3D(point[0], point[1], point[2] || 0, width, height);
-      if (!p.visible) return;
-      if (!started || marker.type === 5 && index % 2 === 0) { vizCtx.moveTo(p.x, p.y); started = true; }
-      else vizCtx.lineTo(p.x, p.y);
-    });
-    vizCtx.stroke();
+    // 선: 굵은 반투명 선 위에 가는 선을 겹쳐 발광 효과
+    for (const [w, a] of [[4, 0.18], [1.6, 0.95]]) {
+      vizCtx.lineWidth = w;
+      vizCtx.globalAlpha = a;
+      vizCtx.beginPath();
+      let started = false;
+      points.forEach((point, index) => {
+        const p = project3D(point[0], point[1], point[2] || 0, width, height);
+        if (!p.visible) return;
+        if (!started || marker.type === 5 && index % 2 === 0) { vizCtx.moveTo(p.x, p.y); started = true; }
+        else vizCtx.lineTo(p.x, p.y);
+      });
+      vizCtx.stroke();
+    }
+    vizCtx.globalAlpha = 1;
     return 1;
   }
   let count = 0;
   // radar 객체 포인트는 점이 너무 많지 않을 때 각 점에 거리 표시
-  const showDist = marker.kind === 'radar' && points.length <= 80;
+  const showDist = marker.kind === 'radar' && points.length <= 80 && view.vizLabels;
   for (const point of points) {
     const p = project3D(point[0], point[1], point[2] || 0, width, height);
     if (!p.visible) continue;
-    vizCtx.beginPath();
-    vizCtx.arc(p.x, p.y, Math.max(2, Math.min(5, p.scale * 0.03)), 0, Math.PI * 2);
-    vizCtx.fill();
+    const r = Math.max(2.2, Math.min(5, p.scale * 0.03));
+    vizCtx.globalAlpha = 0.25;
+    vizCtx.beginPath(); vizCtx.arc(p.x, p.y, r * 2.2, 0, Math.PI * 2); vizCtx.fill();
+    vizCtx.globalAlpha = 1;
+    vizCtx.beginPath(); vizCtx.arc(p.x, p.y, r, 0, Math.PI * 2); vizCtx.fill();
     if (showDist) {
       const d = Math.hypot(point[0], point[1]);
-      vizCtx.font = '9px system-ui, sans-serif';
+      vizCtx.font = '600 10px "Pretendard Variable", Pretendard, system-ui, sans-serif';
       const text = `${d.toFixed(0)}m`;
-      vizCtx.lineWidth = 2.5;
-      vizCtx.strokeStyle = 'rgba(0,0,0,0.75)';
-      vizCtx.strokeText(text, p.x + 4, p.y - 3);
-      vizCtx.fillStyle = color;
-      vizCtx.fillText(text, p.x + 4, p.y - 3);
+      vizCtx.lineWidth = 3;
+      vizCtx.strokeStyle = 'rgba(4,7,11,0.85)';
+      vizCtx.strokeText(text, p.x + 6, p.y - 4);
+      vizCtx.fillText(text, p.x + 6, p.y - 4);
     }
     count += 1;
   }
   return count;
 }
 
-function draw3DBox(box, color, width, height) {
+function hexToRgba(hex, a) {
+  const h = /^#([0-9a-f]{6})$/i.test(hex || '') ? hex : '#9fb2c4';
+  return `rgba(${parseInt(h.slice(1, 3), 16)},${parseInt(h.slice(3, 5), 16)},${parseInt(h.slice(5, 7), 16)},${a})`;
+}
+
+// 박스: 반투명 면(바닥·윗면) + 모서리 + 진행 방향 표시. 라벨은 labels 에 모아 마지막에 겹침 없이 그림
+function draw3DBox(box, color, width, height, labels) {
   const sx = Math.max(box.sx || 1, 0.4) / 2;
   const sy = Math.max(box.sy || 1, 0.4) / 2;
   const sz = Math.max(box.sz || 1, 0.4) / 2;
   const yaw = box.yaw || 0;
   const c = Math.cos(yaw), s = Math.sin(yaw);
+  const bx = box.x || 0, by = box.y || 0, bz = box.z || 0;
+  const P = (dx, dy, dz) => project3D(bx + c * dx - s * dy, by + s * dx + c * dy, bz + dz, width, height);
   const corners = [];
-  for (const dx of [-sx, sx]) for (const dy of [-sy, sy]) for (const dz of [-sz, sz]) {
-    const rx = c * dx - s * dy;
-    const ry = s * dx + c * dy;
-    corners.push(project3D((box.x || 0) + rx, (box.y || 0) + ry, (box.z || 0) + dz, width, height));
-  }
+  for (const dx of [-sx, sx]) for (const dy of [-sy, sy]) for (const dz of [-sz, sz]) corners.push(P(dx, dy, dz));
+  if (corners.some((p) => !p.visible)) return 0;
+  const dist = vehEdgeDist(bx, by);
+  const near = dist < PROX_WARN_M && !insideVehicle(bx, by);
+  const fillFace = (idx, alpha) => {
+    vizCtx.beginPath();
+    idx.forEach((k, i) => (i ? vizCtx.lineTo(corners[k].x, corners[k].y) : vizCtx.moveTo(corners[k].x, corners[k].y)));
+    vizCtx.closePath();
+    vizCtx.fillStyle = hexToRgba(color, alpha);
+    vizCtx.fill();
+  };
+  fillFace([0, 2, 6, 4], near ? 0.22 : 0.12);   // 바닥
+  fillFace([1, 3, 7, 5], near ? 0.32 : 0.2);    // 윗면
   const edges = [[0,1],[0,2],[0,4],[3,1],[3,2],[3,7],[5,1],[5,4],[5,7],[6,2],[6,4],[6,7]];
   vizCtx.strokeStyle = color;
-  vizCtx.lineWidth = box.kind === 'radar' ? 1.7 : 2.2;
-  for (const [a, b] of edges) {
-    if (!corners[a].visible || !corners[b].visible) continue;
-    vizCtx.beginPath();
-    vizCtx.moveTo(corners[a].x, corners[a].y);
-    vizCtx.lineTo(corners[b].x, corners[b].y);
-    vizCtx.stroke();
-  }
-  // 라벨 + 거리 표시 (거리는 항상 표시 — cluster/tracker/radar 박스)
-  let top = null;
-  for (const cnr of corners) { if (cnr.visible && (!top || cnr.y < top.y)) top = cnr; }
-  if (top) {
-    const dist = Math.hypot(box.x || 0, box.y || 0);
-    const lbl = box.label ? String(box.label).slice(0, 16) + ' · ' : '';
-    vizCtx.font = 'bold 11px system-ui, sans-serif';
-    const text = `${lbl}${dist.toFixed(1)}m`;
-    // 가독성을 위해 어두운 외곽선 후 색상 텍스트
-    vizCtx.lineWidth = 3;
-    vizCtx.strokeStyle = 'rgba(0,0,0,0.75)';
-    vizCtx.strokeText(text, top.x + 4, top.y - 5);
-    vizCtx.fillStyle = color;
-    vizCtx.fillText(text, top.x + 4, top.y - 5);
-  }
+  vizCtx.lineWidth = near ? 2.4 : 1.6;
+  vizCtx.beginPath();
+  for (const [a, b] of edges) { vizCtx.moveTo(corners[a].x, corners[a].y); vizCtx.lineTo(corners[b].x, corners[b].y); }
+  vizCtx.stroke();
+  // 진행 방향: 윗면 중심 → 앞면 중심
+  const top = P(0, 0, sz), front = P(sx, 0, sz);
+  vizCtx.lineWidth = 2;
+  vizCtx.beginPath(); vizCtx.moveTo(top.x, top.y); vizCtx.lineTo(front.x, front.y); vizCtx.stroke();
+
+  let peak = corners[0];
+  for (const cnr of corners) if (cnr.y < peak.y) peak = cnr;
+  const tag = box.kind === 'track' && box.id != null ? `#${box.id}` : String(box.label || box.kind || '').slice(0, 14);
+  labels.push({ x: peak.x, y: peak.y - 6, tag, dist, color, near });
+  vizHits.push({ x: top.x, y: top.y, box, color });
   return 1;
 }
 
+function drawVizLabels(labels) {
+  labels.sort((a, b) => (b.near - a.near) || a.dist - b.dist);
+  const placed = [];
+  vizCtx.font = '600 11px "Pretendard Variable", Pretendard, system-ui, sans-serif';
+  for (const l of labels.slice(0, 40)) {
+    const d = `${l.dist.toFixed(1)} m`;
+    const wt = l.tag ? vizCtx.measureText(l.tag).width : 0;
+    const wd = vizCtx.measureText(d).width;
+    const w = wt + wd + (l.tag ? 22 : 14), h = 20;
+    const x = Math.round(l.x - w / 2), y = Math.round(l.y - h);
+    if (placed.some((r) => x < r[2] + 3 && x + w > r[0] - 3 && y < r[3] + 2 && y + h > r[1] - 2)) continue;
+    placed.push([x, y, x + w, y + h]);
+    vizCtx.fillStyle = 'rgba(8,12,18,0.85)';
+    vizCtx.strokeStyle = hexToRgba(l.color, l.near ? 0.9 : 0.45);
+    vizCtx.lineWidth = 1;
+    vizCtx.beginPath();
+    if (vizCtx.roundRect) vizCtx.roundRect(x, y, w, h, 6); else vizCtx.rect(x, y, w, h);
+    vizCtx.fill(); vizCtx.stroke();
+    let tx = x + 7;
+    if (l.tag) { vizCtx.fillStyle = l.color; vizCtx.fillText(l.tag, tx, y + 14); tx += wt + 8; }
+    vizCtx.fillStyle = l.near ? '#ffb4bb' : '#e8eef5';
+    vizCtx.fillText(d, tx, y + 14);
+  }
+}
+
+// 자차: 바닥 그림자 + 차체(불투명 직육면체, 면 깊이 정렬) + 진행 방향 화살표
+// 위치·방향·크기는 vehicleGeom (P 의 x=차량 전방, y=차량 좌측 로컬 좌표)
 function drawEgo3D(width, height) {
-  const pts = [[-3,0,0.3],[2,1.2,0.2],[1,0,1.1],[2,-1.2,0.2]].map((p) => project3D(p[0], p[1], p[2], width, height));
-  if (pts.some((p) => !p.visible)) return;
-  vizCtx.fillStyle = '#f3f6f8';
-  vizCtx.strokeStyle = '#080a0c';
-  vizCtx.lineWidth = 2;
-  vizCtx.beginPath();
-  vizCtx.moveTo(pts[0].x, pts[0].y);
-  for (const p of pts.slice(1)) vizCtx.lineTo(p.x, p.y);
-  vizCtx.closePath();
-  vizCtx.fill();
-  vizCtx.stroke();
+  const L = vehicleGeom.length, W = vehicleGeom.width, H = vehicleGeom.height;
+  const h = vehHeading(), c = Math.cos(h), sn = Math.sin(h);
+  const P = (x, y, z) => project3D(vehicleGeom.cx + c * x - sn * y, vehicleGeom.cy + sn * x + c * y, z, width, height);
+  const v = [];
+  for (const dx of [-L / 2, L / 2]) for (const dy of [-W / 2, W / 2]) for (const dz of [0, H]) v.push(P(dx, dy, dz));
+  if (v.some((p) => !p.visible)) return;
+  // 바닥 발광
+  const g0 = P(0, 0, 0);
+  const glow = vizCtx.createRadialGradient(g0.x, g0.y, 2, g0.x, g0.y, Math.max(20, g0.scale * 4.5));
+  glow.addColorStop(0, 'rgba(56,189,248,0.35)'); glow.addColorStop(1, 'rgba(56,189,248,0)');
+  vizCtx.fillStyle = glow;
+  vizCtx.beginPath(); vizCtx.arc(g0.x, g0.y, Math.max(20, g0.scale * 4.5), 0, Math.PI * 2); vizCtx.fill();
+  const faces = [
+    { i: [0, 2, 6, 4], fill: '#0b131c' }, { i: [1, 3, 7, 5], fill: '#f0765a', top: true },
+    { i: [4, 5, 7, 6], fill: '#1d2b3a' }, { i: [0, 1, 3, 2], fill: '#16222f', rear: true },
+    { i: [0, 1, 5, 4], fill: '#1a2734' }, { i: [2, 3, 7, 6], fill: '#1a2734' },
+  ];
+  for (const f of faces) f.depth = f.i.reduce((a, k) => a + v[k].depth, 0) / 4;
+  faces.sort((a, b) => b.depth - a.depth);
+  for (const f of faces) {
+    vizCtx.beginPath();
+    f.i.forEach((k, n) => (n ? vizCtx.lineTo(v[k].x, v[k].y) : vizCtx.moveTo(v[k].x, v[k].y)));
+    vizCtx.closePath();
+    vizCtx.fillStyle = f.fill;
+    vizCtx.fill();
+    vizCtx.strokeStyle = 'rgba(210,225,240,0.85)';
+    vizCtx.lineWidth = 1.2;
+    vizCtx.stroke();
+  }
+  // 진행 방향 화살표 (차 앞 지면)
+  const a = P(L / 2 + 0.6, 0, 0.05), b = P(L / 2 + 3.6, 0, 0.05), l = P(L / 2 + 2.5, 0.8, 0.05), r = P(L / 2 + 2.5, -0.8, 0.05);
+  vizCtx.strokeStyle = '#38bdf8';
+  vizCtx.lineWidth = 2.4;
+  vizCtx.beginPath(); vizCtx.moveTo(a.x, a.y); vizCtx.lineTo(b.x, b.y); vizCtx.moveTo(l.x, l.y); vizCtx.lineTo(b.x, b.y); vizCtx.lineTo(r.x, r.y); vizCtx.stroke();
+}
+
+// 마우스를 올린 박스 정보
+function updateVizTooltip() {
+  const tip = document.getElementById('vizTip');
+  if (!tip) return;
+  if (!vizMouse || view.dragging) { tip.hidden = true; return; }
+  let best = null, bd = 22;
+  for (const h of vizHits) {
+    const d = Math.hypot(h.x - vizMouse.x, h.y - vizMouse.y);
+    if (d < bd) { bd = d; best = h; }
+  }
+  if (!best) { tip.hidden = true; vizCanvas.style.cursor = ''; return; }
+  const b = best.box;
+  const dist = vehEdgeDist(b.x || 0, b.y || 0);
+  const kindName = { track: '차량 트랙', object: '객체', detection: '클러스터', radar: '레이더', marker: '마커' }[b.kind] || b.kind || '객체';
+  tip.innerHTML = `<b style="color:${best.color}">${escapeHtml(b.kind === 'track' && b.id != null ? `#${b.id}` : String(b.label || kindName))}</b>
+    <span>${escapeHtml(kindName)} · ${objPosLabel(b.x || 0, b.y || 0)}</span>
+    <dl><dt>거리</dt><dd>${insideVehicle(b.x || 0, b.y || 0) ? '차체 안' : `${dist.toFixed(1)} m (차체 기준)`}</dd>
+    <dt>위치</dt><dd>x ${(b.x || 0).toFixed(1)}, y ${(b.y || 0).toFixed(1)}</dd>
+    <dt>크기</dt><dd>${(b.sx || 0).toFixed(1)} × ${(b.sy || 0).toFixed(1)} × ${(b.sz || 0).toFixed(1)} m</dd>
+    <dt>방향</dt><dd>${((b.yaw || 0) * 180 / Math.PI).toFixed(0)}°</dd></dl>
+    <em>${escapeHtml(b.topic || '')}</em>`;
+  tip.hidden = false;
+  const shell = vizCanvas.getBoundingClientRect();
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = `${Math.min(shell.width - tw - 8, best.x + 14)}px`;
+  tip.style.top = `${Math.max(8, Math.min(shell.height - th - 8, best.y - th / 2))}px`;
+  vizCanvas.style.cursor = 'pointer';
 }
 
 async function postVizConfig(settings) {
@@ -1243,7 +1490,10 @@ function renderGpsTrackBtn() {
 }
 
 function updateGpsLiveLine() {
-  if (!(state.gpsTrack && state.gpsTrack.recording) || !state.gps || !gpsMap) return;
+  updatePlayTrack();
+  const rec = state.gpsTrack && (state.gpsTrack.recording || state.gpsTrack.bag_recording);
+  if (!rec && gpsLiveLine && gpsMap) { gpsMap.removeLayer(gpsLiveLine); gpsLiveLine = null; gpsLivePts = []; }
+  if (!rec || !state.gps || !gpsMap || view.mode === 'play') return;
   const pos = [state.gps.latitude, state.gps.longitude];
   const last = gpsLivePts[gpsLivePts.length - 1];
   if (!last || last[0] !== pos[0] || last[1] !== pos[1]) {
@@ -1253,6 +1503,36 @@ function updateGpsLiveLine() {
     } else {
       gpsLiveLine.addLatLng(pos);
     }
+  }
+}
+
+// Play 중인 bag 의 GPS 경로 (보라). 백엔드가 gps_track.json 을 읽거나 bag 에서 추출할 때까지 2초 간격 재확인
+let playTrackLine = null, playTrackFile = null, playTrackPending = false, playTrackNext = 0;
+function clearPlayTrack() {
+  if (playTrackLine && gpsMap) gpsMap.removeLayer(playTrackLine);
+  playTrackLine = null; playTrackFile = null;
+}
+async function updatePlayTrack() {
+  const bp = state.bagPlay || {};
+  const want = view.mode === 'play' && bp.playing ? bp.file : null;
+  if (!want) { if (playTrackFile) clearPlayTrack(); return; }
+  if (!gpsMap || playTrackPending || (playTrackFile === want && playTrackLine) || performance.now() < playTrackNext) return;
+  playTrackPending = true;
+  try {
+    const t = await (await fetch('/api/bag/play/track', { cache: 'no-store' })).json();
+    if (t.file !== want) return;
+    if (t.status === 'loading') { playTrackNext = performance.now() + 2000; return; }
+    clearPlayTrack();
+    playTrackFile = want;
+    if (t.status === 'ready' && t.points && t.points.length) {
+      playTrackLine = L.polyline(t.points.map((p) => [p[1], p[2]]), { color: '#c084fc', weight: 4, opacity: 0.85 }).addTo(gpsMap);
+      playTrackLine.bindTooltip(`Bag 경로 · ${want} (${t.points.length}점)`);
+      gpsMap.fitBounds(playTrackLine.getBounds(), { padding: [24, 24] });
+    }
+  } catch (_) {
+    playTrackNext = performance.now() + 2000;
+  } finally {
+    playTrackPending = false;
   }
 }
 
@@ -1646,7 +1926,8 @@ function bindVehCardEdit() {
 
 // ── 감지 객체 목록 (RViz 박스/레이더 마커 → 거리순 테이블) ──
 function objPosLabel(x, y) {
-  const ang = Math.atan2(y, x) * 180 / Math.PI;   // x=전방, y=좌측
+  const [f, l] = toVeh(x, y);
+  const ang = Math.atan2(l, f) * 180 / Math.PI;   // 차량 기준 0°=전방, +=좌측
   if (ang >= -35 && ang < 35) return '전방';
   if (ang >= 35 && ang < 100) return '전방좌';
   if (ang >= -100 && ang < -35) return '전방우';
@@ -1678,7 +1959,8 @@ function renderObjects() {
         color: colorOf[m.topic] || '#f1bf58' });
     }
   }
-  objs.forEach((o) => { o.dist = Math.hypot(o.x, o.y); });
+  for (let i = objs.length - 1; i >= 0; i--) if (insideVehicle(objs[i].x, objs[i].y)) objs.splice(i, 1);
+  objs.forEach((o) => { o.dist = vehEdgeDist(o.x, o.y); });
   objs.sort((a, b) => a.dist - b.dist);
   const top = objs.slice(0, 30);
   const sub = document.getElementById('objSubtitle');
@@ -1787,8 +2069,9 @@ function renderProximityAlert() {
   const inPlay = view.mode === 'play';
   for (const b of state.visualization.boxes || []) {
     if (isPlayTopic(b.topic) !== inPlay) continue;
-    const d = Math.hypot(b.x || 0, b.y || 0);
-    if (d > 0.3 && (!best || d < best.d)) best = { d, x: b.x || 0, y: b.y || 0, label: b.label || '' };
+    if (insideVehicle(b.x || 0, b.y || 0)) continue;   // 차체 안 = 자차 클러스터
+    const d = vehEdgeDist(b.x || 0, b.y || 0);
+    if (!best || d < best.d) best = { d, x: b.x || 0, y: b.y || 0, label: b.label || '' };
   }
   if (!best || best.d > PROX_WARN_M) { el.hidden = true; return; }
   const danger = best.d <= PROX_DANGER_M;
@@ -2265,7 +2548,7 @@ function refreshCameraStream(card, slot, options) {
   const title = card.querySelector('b');
   const age = card.querySelector('span');
   if (!camera || !slot.topic) {
-    if (img.dataset.topic) { img.removeAttribute('src'); img.dataset.topic = ''; }
+    if (img.dataset.topic) stopCameraStream(img);
     title.textContent = slot.topic ? (slot.topic.split('/').filter(Boolean)[0] || slot.topic) : '—';
     age.textContent = slot.topic ? '수신 없음' : '';
     applyCameraSignalState(card, null, slot);
@@ -2295,7 +2578,9 @@ const CAMERA_STALE_SEC = 3;
 function applyCameraSignalState(card, camera, slot) {
   const empty = !slot.topic;
   const waiting = !!camera && camera.age_sec == null;
-  const stale = !empty && (!camera || (!waiting && camera.age_sec > CAMERA_STALE_SEC));
+  // Play 는 녹화 공백(1~4초)이 그대로 재생되므로 끊김 판정을 늦춤
+  const staleSec = view.mode === 'play' ? CAMERA_STALE_SEC * 2 : CAMERA_STALE_SEC;
+  const stale = !empty && (!camera || (!waiting && camera.age_sec > staleSec));
   card.classList.toggle('cam-empty', empty);
   card.classList.toggle('cam-waiting', waiting);
   card.classList.toggle('cam-stale', stale);
@@ -2304,6 +2589,18 @@ function applyCameraSignalState(card, camera, slot) {
 // MJPEG 스트림 시작 + 실패(브라우저 연결한도/일시 끊김) 시 자동 재시도.
 // 여러 카메라 동시 스트리밍 시 브라우저의 호스트당 동시연결 한도(~6)로
 // 특정 카메라(예: /avm_cam/image_raw)가 안 뜨는 문제를 완화한다.
+// MJPEG 연결을 즉시 끊음. <img> 를 DOM 에서 지우거나 src 속성만 제거하면 Chrome 이 연결을 한동안
+// 붙잡고 있어 포트당 연결 한도(6)를 잡아먹으므로, 빈 이미지로 바꿔 요청을 중단시킨다.
+const CAMERA_BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+function stopCameraStream(img) {
+  if (img._camRetry) { clearTimeout(img._camRetry); img._camRetry = null; }
+  img.onerror = null;
+  if (img.getAttribute('src')) img.src = CAMERA_BLANK;
+  img.removeAttribute('src');
+  img.dataset.topic = '';
+  img.dataset.baseurl = '';
+}
+
 function startCameraStream(img, baseUrl) {
   if (img._camRetry) { clearTimeout(img._camRetry); img._camRetry = null; }
   const load = () => {
@@ -2319,6 +2616,7 @@ function startCameraStream(img, baseUrl) {
 }
 
 function rebuildCameraGrid(options) {
+  cameraGrid.querySelectorAll('img').forEach(stopCameraStream);   // 기존 스트림 연결 정리 후 다시 만듦
   cameraGrid.innerHTML = '';
   applyCamGrid();
   for (const slot of view.cameraLayout.slots) {
@@ -2350,14 +2648,11 @@ function renderCameras() {
     view.cameraOptionSig = sig;
     rebuildCameraGrid(options);
   } else {
-    // 스트림 age만 갱신
+    // 스트림 연결 상태·age 갱신. 나중에 나타난 카메라(예: Play 시작 직후의 /bagplay 토픽)는
+    // 여기서 스트림을 시작한다 (이전에는 새로고침해야 연결됐음)
     for (const slot of view.cameraLayout.slots) {
       const card = cameraGrid.querySelector(`.camera-card[data-id="${CSS.escape(slot.id)}"]`);
-      if (!card) continue;
-      const camera = activeCameraFor(slot);
-      const age = card.querySelector('span');
-      if (age && camera) age.textContent = camera.age_sec == null ? 'waiting' : `${camera.age_sec}s ago`;
-      applyCameraSignalState(card, camera, slot);
+      if (card) refreshCameraStream(card, slot, options);
     }
   }
   cameraStatus.textContent = `${view.cameraLayout.slots.length}개 슬롯 · ${options.length}개 토픽`;
@@ -2438,16 +2733,29 @@ function setZoom(value) {
 
 function setViewPreset(name) {
   const dz = view.vizSettings.defaultZoom || 1;
+  const y0 = -vehHeading();   // 차량 전방이 화면 위쪽이 되는 yaw
   const presets = {
-    top: { yaw: 0, pitch: Math.PI / 2, zoom: dz * 1.05 },
-    front: { yaw: 0, pitch: 0.02, zoom: dz },
-    left: { yaw: Math.PI / 2, pitch: 0.02, zoom: dz },
-    right: { yaw: -Math.PI / 2, pitch: 0.02, zoom: dz },
-    reset: { yaw: 0, pitch: 1.08, zoom: dz },
+    top: { yaw: y0, pitch: Math.PI / 2, zoom: dz * 1.05 },
+    front: { yaw: y0, pitch: 0.02, zoom: dz },
+    left: { yaw: y0 + Math.PI / 2, pitch: 0.02, zoom: dz },
+    right: { yaw: y0 - Math.PI / 2, pitch: 0.02, zoom: dz },
+    reset: { yaw: y0, pitch: 1.08, zoom: dz },
   };
-  Object.assign(view, presets[name] || presets.reset);
-  view.panX = 0; view.panY = 0;  // 이동(pan) 초기화
-  setZoom(view.zoom);
+  // 현재 시점 → 목표 시점으로 0.35초 동안 부드럽게 이동 (yaw 는 짧은 쪽으로 회전)
+  const to = { ...(presets[name] || presets.reset), panX: 0, panY: 0 };
+  const from = { yaw: view.yaw, pitch: view.pitch, zoom: view.zoom, panX: view.panX, panY: view.panY };
+  let dyaw = ((to.yaw - from.yaw) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+  const t0 = performance.now(), dur = 350;
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - t, 3);
+    view.yaw = from.yaw + dyaw * e;
+    view.pitch = from.pitch + (to.pitch - from.pitch) * e;
+    view.panX = from.panX + (to.panX - from.panX) * e;
+    view.panY = from.panY + (to.panY - from.panY) * e;
+    setZoom(from.zoom + (to.zoom - from.zoom) * e);
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function setLayout(value, save = true) {
@@ -2880,6 +3188,29 @@ vizCanvas.addEventListener('pointermove', (event) => {
   renderVisualization();
 });
 vizCanvas.addEventListener('pointerup', () => { view.dragging = false; });
+vizCanvas.addEventListener('pointermove', (event) => {
+  const r = vizCanvas.getBoundingClientRect();
+  vizMouse = { x: event.clientX - r.left, y: event.clientY - r.top };
+  if (!view.dragging) updateVizTooltip();
+});
+vizCanvas.addEventListener('pointerleave', () => { vizMouse = null; updateVizTooltip(); });
+document.querySelectorAll('#vizColorMode [data-cmode]').forEach((b) => {
+  b.classList.toggle('active', b.dataset.cmode === view.vizColorMode);
+  b.addEventListener('click', () => {
+    view.vizColorMode = b.dataset.cmode;
+    localStorage.setItem('rosWebVizColorMode', view.vizColorMode);
+    document.querySelectorAll('#vizColorMode [data-cmode]').forEach((x) => x.classList.toggle('active', x === b));
+    renderVisualization();
+  });
+});
+const vizLabelBtn = document.getElementById('vizLabelToggle');
+vizLabelBtn.classList.toggle('active', view.vizLabels);
+vizLabelBtn.addEventListener('click', () => {
+  view.vizLabels = !view.vizLabels;
+  localStorage.setItem('rosWebVizLabels', view.vizLabels ? 'on' : 'off');
+  vizLabelBtn.classList.toggle('active', view.vizLabels);
+  renderVisualization();
+});
 // 가운데 버튼 클릭 시 브라우저 기본 자동스크롤 차단
 vizCanvas.addEventListener('auxclick', (event) => { if (event.button === 1) event.preventDefault(); });
 vizCanvas.addEventListener('wheel', (event) => { event.preventDefault(); setZoom(view.zoom + (event.deltaY < 0 ? 0.14 : -0.14)); }, { passive: false });
@@ -2919,10 +3250,7 @@ function vdNotice(message) {
 // POST 요청이 슬롯을 못 잡아 간헐적으로 막힌다. 곧 종료/재부팅하므로 안전하게 연결을 비운다.
 function freeHttpConnections() {
   try {
-    document.querySelectorAll('.camera-card img').forEach((img) => {
-      if (img._camRetry) { clearTimeout(img._camRetry); img._camRetry = null; }
-      img.onerror = null; img.removeAttribute('src'); img.dataset.topic = '';
-    });
+    document.querySelectorAll('.camera-card img').forEach(stopCameraStream);
     if (typeof events !== 'undefined' && events && events.close) events.close();
   } catch (_) {}
 }
@@ -3186,7 +3514,7 @@ renderVizLegend();
 const DRIVE_DEFAULTS = {
   tracks: true, clusters: true, radar: true, lidar: false, path: true,
   camMode: 'auto', cameras: [], camLayout: 'strip',
-  range: 80, laneWidth: 3.5, steerRatio: 14.5, wheelbase: 2.7,
+  range: 80, range2d: 20, laneWidth: 3.5, steerRatio: 14.5, wheelbase: 2.7,
 };
 const DRIVE_PRESETS = {
   chase:   { yaw: 0,     pitch: 0.36, dist: 30, tx: 16 },
@@ -3208,7 +3536,9 @@ const driveSettings = (() => {
     saved.cameras = saved.cameraTopic ? [saved.cameraTopic] : [];
   }
   delete saved.camera; delete saved.cameraTopic;
-  return { ...DRIVE_DEFAULTS, ...saved, cameras: Array.isArray(saved.cameras) ? saved.cameras : [] };
+  if (saved.range2d === 30) saved.range2d = 20;   // 이전 기본값(30 m) → 새 기본값
+  const cameras = (Array.isArray(saved.cameras) ? saved.cameras : []).map((t) => t.replace(/^\/bagplay(?=\/)/, ''));
+  return { ...DRIVE_DEFAULTS, ...saved, cameras };
 })();
 function saveDriveSettings() { localStorage.setItem('rosWebDriveSettings', JSON.stringify(driveSettings)); }
 
@@ -3218,11 +3548,13 @@ const driveCam = (() => {
   const preset = localStorage.getItem('rosWebDrivePreset') || 'chase';
   return { preset, ...(DRIVE_PRESETS[preset] || DRIVE_PRESETS.chase), dragging: false, lastX: 0, lastY: 0 };
 })();
-let driveRange2d = driveSettings.range;
+let driveRange2d = driveSettings.range2d;
 // 2D 뷰 이동량(m): 화면 중심을 전방 panF, 좌측 panL 만큼 옮김. radar2dMap = 마지막 렌더의 좌표 변환값
 const view2d = { panF: 0, panL: 0, dragging: false, lastX: 0, lastY: 0 };
 let radar2dMap = null;
-function resetView2d() { driveRange2d = driveSettings.range; view2d.panF = 0; view2d.panL = 0; }
+function resetView2d() { driveRange2d = driveSettings.range2d; view2d.panF = 0; view2d.panL = 0; }
+// 2D 후방 표시 거리: 전방의 20%, 단 자차 뒤끝 + 2 m 이상
+function radar2dRear(R) { return Math.max(R * 0.2, vehicleGeom.length / 2 + 2); }
 // 표시 폭에 맞는 1·2·5 단위 눈금 간격 (화면에 약 8~12칸)
 function niceGridStep(span) {
   const raw = span / 10;
@@ -3256,16 +3588,38 @@ function setDrivePreset(name) {
 }
 
 // ── 장면 데이터 구성 ──
+// GPS 진행방향(track, 북 기준 시계방향) 변화율 → 요레이트(deg/s, +=좌회전). 새 GPS 샘플마다 갱신
+const gpsMotion = { key: '', track: null, t: 0, rate: 0 };
+function gpsMotionUpdate(g) {
+  const key = `${g.latitude},${g.longitude},${g.track}`;
+  if (key === gpsMotion.key) return;
+  const now = performance.now() / 1000;
+  if (gpsMotion.track != null && now - gpsMotion.t > 0.2 && now - gpsMotion.t < 5) {
+    const d = ((g.track - gpsMotion.track + 540) % 360) - 180;
+    gpsMotion.rate = gpsMotion.rate * 0.5 + (-d / (now - gpsMotion.t)) * 0.5;
+  }
+  Object.assign(gpsMotion, { key, track: g.track, t: now });
+}
+
 function driveVehicleState() {
   const v = view.mode === 'play' ? state.vehiclePlay : state.vehicle;
-  if (!v) return null;
+  if (!v) {
+    // CAN(/acu_ck2_ver2) 이 없으면 GPSFix 속도·진행방향으로 대신 (bag 재생 시 차량 움직임 표시용)
+    const g = view.mode === 'play' ? state.gpsPlay : state.gps;
+    if (!g || typeof g.speed !== 'number' || g.age_sec > 3) return null;
+    if (typeof g.track === 'number') gpsMotionUpdate(g);
+    const mps = Math.max(0, g.speed);
+    const yawRate = mps > 1 ? gpsMotion.rate : 0;
+    return { source: 'gps', speed: mps * 3.6, steer: null, yawRate, curvature: mps > 1 ? (yawRate * Math.PI / 180) / mps : 0,
+      brake: 0, torque: 0, gear: '—' };
+  }
   const n = (x) => (typeof x === 'number' ? x : 0);
   const wheels = [v.wheel_fl, v.wheel_fr, v.wheel_rl, v.wheel_rr].filter((x) => typeof x === 'number');
   const speed = wheels.length ? wheels.reduce((a, b) => a + b, 0) / wheels.length : 0;
   const steer = n(v.steer_angle);   // 차량 규약: + = 좌
   const roadWheel = steer / Math.max(1, driveSettings.steerRatio) * Math.PI / 180;
   const curvature = Math.tan(roadWheel) / Math.max(0.5, driveSettings.wheelbase);
-  return { speed, steer, curvature, brake: n(v.brake), torque: n(v.motor_tq), gear: VEH_GEAR[Math.round(n(v.gear))] ?? '—' };
+  return { source: 'can', speed, steer, curvature, brake: n(v.brake), torque: n(v.motor_tq), gear: VEH_GEAR[Math.round(n(v.gear))] ?? '—' };
 }
 
 // 예상 경로 위 호 길이 s, 횡 오프셋 d 지점 (x, y)
@@ -3293,7 +3647,9 @@ function driveScene() {
   for (const b of viz.boxes || []) {
     if (isPlayTopic(b.topic) !== inPlay) continue;
     if (b.ns === 'vehicle_rejected') continue;
-    const o = { ...b, x: b.x || 0, y: b.y || 0, z: b.z || 0, dist: Math.hypot(b.x || 0, b.y || 0) };
+    if (insideVehicle(b.x || 0, b.y || 0)) continue;   // 차체 안 = 자차 클러스터
+    const [f, l] = toVeh(b.x || 0, b.y || 0);
+    const o = { ...b, x: f, y: l, z: b.z || 0, yaw: (b.yaw || 0) - vehHeading(), dist: vehEdgeDist(b.x || 0, b.y || 0) };
     if (b.kind === 'track') tracks.push(o);
     else if (b.kind !== 'radar') clusters.push(o);
   }
@@ -3303,22 +3659,34 @@ function driveScene() {
   const lanes = [];
   for (const m of viz.markers || []) {
     if (isPlayTopic(m.topic) !== inPlay) continue;
-    if (/lane/i.test(m.topic) && [4, 5].includes(m.type)) { lanes.push(m); continue; }
+    if (/lane/i.test(m.topic) && [4, 5].includes(m.type)) {
+      lanes.push({ ...m, points: (m.points || []).map((p) => [...toVeh(p[0], p[1]), p[2] || 0]) });
+      continue;
+    }
     if (m.kind !== 'radar' || [4, 5].includes(m.type)) continue;
-    for (const p of m.points || []) radar.push({ x: p[0] || 0, y: p[1] || 0, z: p[2] || 0, dist: Math.hypot(p[0] || 0, p[1] || 0) });
+    for (const p of m.points || []) {
+      const [f, l] = toVeh(p[0] || 0, p[1] || 0);
+      radar.push({ x: f, y: l, z: p[2] || 0, dist: vehEdgeDist(p[0] || 0, p[1] || 0) });
+    }
   }
   const lidarTopic = effectiveTopic((view.vizLayers.find((l) => l.id === 'l1') || {}).topic || '');
   const lidar = [];
+  const hasLidarTopic = (viz.point_layers || []).some((l) => l.topic === lidarTopic);
   for (const layer of viz.point_layers || []) {
     if (isPlayTopic(layer.topic) !== inPlay) continue;
-    if (lidarTopic ? layer.topic !== lidarTopic : /radar/i.test(layer.topic)) continue;
-    lidar.push(layer.points || []);
+    // LiDAR 레이어 토픽이 없으면 병합 좌표계로 변환된 개별 라이다로 대체
+    const use = lidarTopic && hasLidarTopic ? layer.topic === lidarTopic : (lidarTopic ? layer.merge_part : !/radar/i.test(layer.topic));
+    if (!use) continue;
+    lidar.push(ds.lidar ? (layer.points || []).map((p) => [...toVeh(p[0], p[1]), p[2] || 0]) : []);
   }
   // 선행 차량: 예상 경로 차로 안에서 가장 가까운 전방 객체 (트랙 우선, 없으면 클러스터)
-  const inLane = (o) => o.x > 1.5 && o.x < ds.range && Math.abs(pathLateral(k, o.x, o.y)) < ds.laneWidth / 2 + 0.4;
+  const front = vehicleGeom.length / 2;   // 차량 중심 → 앞 범퍼
+  const inLane = (o) => o.x > front + 0.3 && o.x < front + ds.range && Math.abs(pathLateral(k, o.x, o.y)) < ds.laneWidth / 2 + 0.4;
   const pick = (arr) => arr.filter(inLane).sort((a, b) => a.x - b.x)[0] || null;
   const lead = (ds.tracks && pick(tracks)) || (ds.clusters && pick(clustersOnly)) || null;
   const leadRadar = lead ? radar.find((r) => Math.hypot(r.x - lead.x, r.y - lead.y) < 2.8) || null : null;
+  // 앞 범퍼 ~ 선행 객체 뒷면 간격 (객체의 전방축 방향 반폭 = |cos|·sx/2 + |sin|·sy/2)
+  if (lead) lead.gap = lead.x - front - (Math.abs(Math.cos(lead.yaw || 0)) * (lead.sx || 0) + Math.abs(Math.sin(lead.yaw || 0)) * (lead.sy || 0)) / 2;
   return {
     veh, k, lead, leadRadar, lanes,
     tracks: ds.tracks ? tracks : [],
@@ -3439,7 +3807,7 @@ function drawSolid(cam, cx, cy, z0, L, W, H, yaw, style) {
 // 차량 모형: 바퀴 + 차체 + 캐빈(지붕 강조색)
 function drawCar(cam, o, accent, opts = {}) {
   const L = Math.max(2.6, Math.min(12, Math.max(o.sx || 4.4, o.sy || 1.8)));
-  const W = Math.max(1.4, Math.min(3.0, Math.min(o.sx || 4.4, o.sy || 1.8)));
+  const W = Math.max(1.4, Math.min(3.2, Math.min(o.sx || 4.4, o.sy || 1.8)));
   const H = Math.max(1.2, Math.min(3.4, o.sz || 1.5));
   const yaw = (o.sy || 0) > (o.sx || 0) ? (o.yaw || 0) + Math.PI / 2 : (o.yaw || 0);
   const c = Math.cos(yaw), s = Math.sin(yaw);
@@ -3504,7 +3872,7 @@ function driveCameraTopics() {
   const live = liveCameraImgs();
   if (ds.camMode === 'off') return [];
   if (ds.camMode === 'all') return [...live.keys()];
-  if (ds.camMode === 'select') return ds.cameras.slice();
+  if (ds.camMode === 'select') return ds.cameras.map((t) => effectiveTopic(logicalTopic(t)));   // Play 에서는 /bagplay/... 로
   const keys = [...live.keys()];
   const front = keys.find((t) => /front/i.test(t) && !/left|right/i.test(t)) || keys.find((t) => /front/i.test(t)) || keys[0];
   return front ? [front] : [];
@@ -3537,7 +3905,8 @@ function drawCameraTile(img, topic, x, y, w, h) {
   driveCtx.fillRect(x, y + h - 18, w, 18);
   driveCtx.fillStyle = '#e8eef5';
   driveCtx.font = '600 10.5px "JetBrains Mono", ui-monospace, monospace';
-  const name = topic.split('/').filter(Boolean)[0] || topic;
+  const parts = topic.split('/').filter(Boolean);
+  const name = (isPlayTopic(topic) ? parts[1] : parts[0]) || topic;   // /bagplay/<카메라>/... 는 카메라 이름 표시
   driveCtx.fillText(name.length * 6.4 > w - 12 ? name.slice(0, Math.max(3, Math.floor((w - 12) / 6.4))) : name, x + 6, y + h - 5);
   driveCtx.restore();
   driveCtx.strokeStyle = 'rgba(120,170,220,0.38)';
@@ -3644,9 +4013,12 @@ function renderDrive3D(sc) {
   // 지면 그리드
   const gx0 = -30, gx1 = range + 20, gy = 40, step = 5;
   driveCtx.lineWidth = 1;
-  for (let x = Math.ceil(gx0 / step) * step; x <= gx1; x += step) {
+  const odo = driveOdo % 20;
+  for (let x = Math.ceil(gx0 / step) * step; x <= gx1 + 20; x += step) {
+    const xs = x - odo;   // 주행거리만큼 뒤로 이동
+    if (xs < gx0 || xs > gx1) continue;
     driveCtx.strokeStyle = x % 20 === 0 ? 'rgba(120,170,220,0.16)' : 'rgba(120,170,220,0.07)';
-    strokePoly3(cam, [[x, -gy, 0], [x, gy, 0]]);
+    strokePoly3(cam, [[xs, -gy, 0], [xs, gy, 0]]);
   }
   for (let y = -gy; y <= gy; y += step) {
     driveCtx.strokeStyle = 'rgba(120,170,220,0.07)';
@@ -3662,13 +4034,18 @@ function renderDrive3D(sc) {
     if (fillPoly3(cam, [...left, ...right])) driveCtx.fill();
     driveCtx.strokeStyle = 'rgba(210,225,240,0.75)'; driveCtx.lineWidth = 2;
     strokePoly3(cam, along(lw / 2)); strokePoly3(cam, along(-lw / 2));
-    driveCtx.setLineDash([10, 12]); driveCtx.strokeStyle = 'rgba(150,170,190,0.35)'; driveCtx.lineWidth = 1.4;
-    strokePoly3(cam, along(lw * 1.5)); strokePoly3(cam, along(-lw * 1.5));
-    driveCtx.setLineDash([]);
+    // 바깥 차선: 지면 좌표 기준 점선(3 m 칠, 6 m 빔) — 주행거리만큼 흘러감
+    driveCtx.strokeStyle = 'rgba(170,190,210,0.5)'; driveCtx.lineWidth = 1.6;
+    for (let s0 = -(driveOdo % 9); s0 < range; s0 += 9) {
+      for (const d of [lw * 1.5, -lw * 1.5]) {
+        const a = pathPoint(k, Math.max(0, s0), d), b = pathPoint(k, Math.max(0, s0 + 3), d);
+        if (s0 + 3 > 0) strokePoly3(cam, [[a[0], a[1], 0.02], [b[0], b[1], 0.02]]);
+      }
+    }
     // 거리 눈금
     driveCtx.font = '500 12px "Pretendard Variable", Pretendard, system-ui, sans-serif';
     for (let d = 20; d <= range; d += 20) {
-      const p = pathPoint(k, d, -lw * 1.5 - 1.2);
+      const p = pathPoint(k, vehicleGeom.length / 2 + d, -lw * 1.5 - 1.2);   // 앞 범퍼 기준 거리
       const sp = project(cam, [p[0], p[1], 0]);
       if (!sp || sp.y < 0 || sp.y > height) continue;
       driveCtx.fillStyle = 'rgba(160,180,200,0.75)';
@@ -3676,10 +4053,11 @@ function renderDrive3D(sc) {
       driveCtx.fillRect(sp.x - 8, sp.y - 4, 8, 1);
     }
     // 선행 차량까지 경로 빔
-    const leadS = sc.lead ? Math.max(3, sc.lead.x - 2.5) : 14;
-    const beamL = along(0.45, 2.6, leadS), beamR = along(-0.45, 2.6, leadS).reverse();
+    const bumper = vehicleGeom.length / 2 + 0.1;
+    const leadS = sc.lead ? Math.max(bumper + 0.5, sc.lead.x - 2.5) : bumper + 12;
+    const beamL = along(0.45, bumper, leadS), beamR = along(-0.45, bumper, leadS).reverse();
     if (fillPoly3(cam, [...beamL, ...beamR])) {
-      const n0 = project(cam, [2.6, 0, 0]), n1 = project(cam, pathPoint(k, leadS).concat(0));
+      const n0 = project(cam, [bumper, 0, 0]), n1 = project(cam, pathPoint(k, leadS).concat(0));
       const g = n0 && n1 ? driveCtx.createLinearGradient(n0.x, n0.y, n1.x, n1.y) : null;
       if (g) { g.addColorStop(0, 'rgba(56,189,248,0.75)'); g.addColorStop(1, 'rgba(56,189,248,0.08)'); }
       driveCtx.fillStyle = g || 'rgba(56,189,248,0.35)';
@@ -3707,7 +4085,7 @@ function renderDrive3D(sc) {
   // 객체·자차를 깊이 순으로
   const items = [];
   const depthOf = (x, y) => camSpace(cam, [x, y, 0.8])[2];
-  items.push({ depth: depthOf(0, 0), draw: () => drawCar(cam, { x: 0, y: 0, sx: 4.6, sy: 1.9, sz: 1.55, yaw: 0 }, DRIVE_COLORS.ego,
+  items.push({ depth: depthOf(0, 0), draw: () => drawCar(cam, { x: 0, y: 0, sx: vehicleGeom.length, sy: vehicleGeom.width, sz: vehicleGeom.height, yaw: 0 }, DRIVE_COLORS.ego,
     { body: DRIVE_COLORS.egoBody, tail: '#ff5d6c', stroke: 'rgba(200,220,240,0.85)' }) });
   for (const t of sc.tracks) {
     const isLead = t === sc.lead;
@@ -3746,7 +4124,7 @@ function renderDrive3D(sc) {
   for (const o of labeled) {
     const s = project(cam, [o.x, o.y, Math.max(1.6, (o.z || 0) + (o.sz || 1) / 2) + 0.9]);
     if (!s || s.x < -40 || s.x > width + 40 || s.y < 10 || s.y > height) continue;
-    if (o === sc.lead) drawLabel(s.x, s.y, [{ text: 'LEAD', color: DRIVE_COLORS.lead }, { text: `${o.x.toFixed(1)} m`, color: '#e8eef5' }], 'rgba(61,220,151,0.6)', placed);
+    if (o === sc.lead) drawLabel(s.x, s.y, [{ text: 'LEAD', color: DRIVE_COLORS.lead }, { text: `${Math.max(0, o.gap).toFixed(1)} m`, color: '#e8eef5' }], 'rgba(61,220,151,0.6)', placed);
     else {
       const tag = o.kind === 'track' ? `#${o.id ?? '?'}` : '장애물';
       const col = o.kind === 'track' ? DRIVE_COLORS.track : DRIVE_COLORS.cluster;
@@ -3764,7 +4142,7 @@ function renderRadar2D(sc) {
   driveCtx.fillStyle = '#080c12';
   driveCtx.fillRect(0, 0, width, height);
   const R = driveRange2d;          // 화면 중심(자차+이동량) 기준 전방 표시 거리
-  const Rr = R * 0.2;              // 후방 표시 거리
+  const Rr = radar2dRear(R);       // 후방 표시 거리
   const padL = 58, padR = 16, padT = 52, padB = 38;   // 위·아래 여백은 HUD 글자 자리
   const plotH = height - padT - padB;
   const scale = plotH / (R + Rr);
@@ -3813,12 +4191,17 @@ function renderRadar2D(sc) {
       }
       driveCtx.stroke();
     };
-    driveCtx.setLineDash([7, 8]);
     driveCtx.strokeStyle = 'rgba(200,215,230,0.55)'; driveCtx.lineWidth = 1.4;
     lane(lw / 2); lane(-lw / 2);
-    driveCtx.strokeStyle = 'rgba(160,175,190,0.3)';
-    lane(lw * 1.5); lane(-lw * 1.5);
-    driveCtx.setLineDash([]);
+    // 바깥 차선: 지면 좌표 점선(3 m / 9 m 주기) — 주행거리만큼 흘러 움직임 표시
+    driveCtx.strokeStyle = 'rgba(170,185,200,0.45)';
+    const s0 = Math.min(-Rr * 0.3, panF - Rr), s1 = Math.max(R, panF + R);
+    for (let s = s0 - ((driveOdo + s0) % 9 + 9) % 9; s < s1; s += 9) {
+      for (const d of [lw * 1.5, -lw * 1.5]) {
+        const a = toS(...pathPoint(k, s, d)), b = toS(...pathPoint(k, s + 3, d));
+        driveCtx.beginPath(); driveCtx.moveTo(a[0], a[1]); driveCtx.lineTo(b[0], b[1]); driveCtx.stroke();
+      }
+    }
   }
   for (const m of sc.lanes) {
     driveCtx.strokeStyle = m.color || '#e8eef5'; driveCtx.lineWidth = 1.6;
@@ -3861,12 +4244,12 @@ function renderRadar2D(sc) {
   for (const c of sc.clusters) {
     const lead = c === sc.lead;
     const [sx, sy] = rect(c, lead ? DRIVE_COLORS.lead : 'rgba(255,93,108,0.85)', lead ? 'rgba(61,220,151,0.14)' : 'rgba(255,93,108,0.12)');
-    if (lead) text(`LEAD ${c.x.toFixed(1)} m`, sx + 10, sy - 6, DRIVE_COLORS.lead);
+    if (lead) text(`LEAD ${Math.max(0, c.gap).toFixed(1)} m`, sx + 10, sy - 6, DRIVE_COLORS.lead);
   }
   for (const t of sc.tracks) {
     const lead = t === sc.lead;
     const [sx, sy] = rect(t, lead ? DRIVE_COLORS.lead : '#7ee0b0', lead ? 'rgba(61,220,151,0.22)' : 'rgba(126,224,176,0.10)');
-    text(lead ? `LEAD #${t.id ?? '?'} ${t.x.toFixed(1)} m` : `#${t.id ?? '?'}`, sx + 10, sy - 6, lead ? DRIVE_COLORS.lead : DRIVE_COLORS.track);
+    text(lead ? `LEAD #${t.id ?? '?'} ${Math.max(0, t.gap).toFixed(1)} m` : `#${t.id ?? '?'}`, sx + 10, sy - 6, lead ? DRIVE_COLORS.lead : DRIVE_COLORS.track);
   }
   const labelRadar = sc.radar.length <= 40;
   for (const r of sc.radar) {
@@ -3879,7 +4262,7 @@ function renderRadar2D(sc) {
 
   // 자차
   const [ex, ey] = toS(0, 0);
-  const ew = Math.max(12, 1.9 * scale), eh = Math.max(22, 4.6 * scale);
+  const ew = Math.max(12, vehicleGeom.width * scale), eh = Math.max(22, vehicleGeom.length * scale);
   driveCtx.fillStyle = '#e8eef5';
   driveCtx.beginPath();
   if (driveCtx.roundRect) driveCtx.roundRect(ex - ew / 2, ey - eh / 2, ew, eh, 3); else driveCtx.rect(ex - ew / 2, ey - eh / 2, ew, eh);
@@ -3897,27 +4280,34 @@ function updateDriveHud(sc) {
   $('#driveSource').classList.toggle('play', inPlay);
   const badge = $('#driveLaneBadge');
   if (sc.lanes.length) badge.textContent = `차선 마커 ${sc.lanes.length}개`;
-  else if (driveSettings.path) badge.textContent = v ? '예상 주행 경로 · 조향 기반' : '예상 경로 · 차량 데이터 없음';
+  else if (driveSettings.path) badge.textContent = !v ? '예상 경로 · 차량 데이터 없음' : v.source === 'gps' ? '예상 주행 경로 · GPS 방향 기반' : '예상 주행 경로 · 조향 기반';
   else badge.textContent = '';
   badge.hidden = !badge.textContent;
   const nObj = sc.tracks.length + sc.clusters.length;
   const grid = view.vizTab === 'radar2d' && radar2dMap ? ` · 눈금 ${radar2dMap.step < 1 ? radar2dMap.step.toFixed(1) : radar2dMap.step} m` : '';
   $('#driveCount').textContent = `주변 객체 ${nObj}개 · 레이더 ${sc.radar.length}${grid}`;
   vizStats.textContent = `트랙 ${sc.tracks.length} · 클러스터 ${sc.clusters.length} · 레이더 ${sc.radar.length}${sc.lidar.length ? ` · LiDAR ${sc.lidar.reduce((a, p) => a + p.length, 0)}` : ''}`;
-  $('#dsSpeed').innerHTML = v ? `${Math.abs(v.speed).toFixed(1)} <small>km/h</small> <i class="ds-gear">${escapeHtml(v.gear)}</i>` : '—';
+  $('#dsSpeed').innerHTML = !v ? '—' : `${Math.abs(v.speed).toFixed(1)} <small>km/h</small> <i class="ds-gear">${escapeHtml(v.source === 'gps' ? 'GPS' : v.gear)}</i>`;
   // 차량 규약 +=좌. 부호 대신 좌/우로 표기 (Vehicle Monitor 게이지는 우=+ 로 반전 표시)
-  $('#dsSteer').textContent = !v ? '—' : Math.abs(v.steer) < 0.5 ? '직진 0.0°' : `${v.steer > 0 ? '좌' : '우'} ${Math.abs(v.steer).toFixed(1)}°`;
-  const pedal = !v ? '—' : v.brake > 2 ? '브레이크 밟음' : v.torque > 5 ? '가속 중' : '페달 없음';
+  $('#dsSteer').textContent = !v ? '—'
+    : v.source === 'gps' ? (Math.abs(v.yawRate) < 0.5 ? '직진 (GPS)' : `${v.yawRate > 0 ? '좌' : '우'}회전 ${Math.abs(v.yawRate).toFixed(1)}°/s`)
+    : Math.abs(v.steer) < 0.5 ? '직진 0.0°' : `${v.steer > 0 ? '좌' : '우'} ${Math.abs(v.steer).toFixed(1)}°`;
+  const pedal = !v ? '—' : v.source === 'gps' ? '— (CAN 없음)' : v.brake > 2 ? '브레이크 밟음' : v.torque > 5 ? '가속 중' : '페달 없음';
   const pedalEl = $('#dsPedal');
   pedalEl.textContent = pedal;
   pedalEl.className = v && v.brake > 2 ? 'ds-brake' : v && v.torque > 5 ? 'ds-accel' : '';
   const leadEl = $('#dsLead');
-  leadEl.textContent = sc.lead ? `${sc.lead.x.toFixed(1)} m${sc.lead.kind === 'track' ? ` · #${sc.lead.id ?? '?'}` : ''}` : '없음';
-  leadEl.className = sc.lead && sc.lead.x < PROX_WARN_M ? 'ds-brake' : sc.lead ? 'ds-lead' : '';
+  leadEl.textContent = sc.lead ? `${Math.max(0, sc.lead.gap).toFixed(1)} m${sc.lead.kind === 'track' ? ` · #${sc.lead.id ?? '?'}` : ''}` : '없음';
+  leadEl.className = sc.lead && sc.lead.gap < PROX_WARN_M ? 'ds-brake' : sc.lead ? 'ds-lead' : '';
 }
 
+// 누적 주행거리(m): 지면 격자·차선 점선을 차량 속도만큼 뒤로 흘려 움직임을 표시
+let driveOdo = 0, driveOdoT = 0;
 function renderDriveView() {
   const sc = driveScene();
+  const now = performance.now() / 1000;
+  if (sc.veh && driveOdoT) driveOdo += (sc.veh.speed / 3.6) * Math.min(0.5, now - driveOdoT);
+  driveOdoT = now;
   if (view.vizTab === 'radar2d') renderRadar2D(sc); else renderDrive3D(sc);
   updateDriveHud(sc);
 }
@@ -3925,14 +4315,14 @@ function renderDriveView() {
 // ── 설정 (통합 설정 창 → RViz 탭 '주행 뷰' 섹션) ──
 let driveEdit = null;
 function cameraTopicChoices() {
-  const set = new Set([...currentModeCameras().map((c) => c.name), ...view.cameraLayout.slots.map((sl) => sl.topic).filter(Boolean)]);
-  if (driveEdit) driveEdit.cameras.forEach((t) => set.add(t));
+  const set = new Set([...currentModeCameras().map((c) => logicalTopic(c.name)), ...view.cameraLayout.slots.map((sl) => logicalTopic(sl.topic)).filter(Boolean)]);
+  if (driveEdit) driveEdit.cameras.forEach((t) => set.add(logicalTopic(t)));
   return [...set].sort();
 }
 function renderDriveCamList() {
   const el = $('#dsetCamList');
   if (!el || !driveEdit) return;
-  const inGrid = new Set(view.cameraLayout.slots.map((sl) => sl.topic).filter(Boolean));
+  const inGrid = new Set(view.cameraLayout.slots.map((sl) => logicalTopic(sl.topic)).filter(Boolean));
   const topics = cameraTopicChoices();
   const selectable = driveEdit.camMode === 'select';
   el.classList.toggle('disabled', !selectable);
@@ -3945,6 +4335,7 @@ function renderDriveCamList() {
   }));
 }
 function openDriveSettingsEdit() {
+  document.querySelectorAll('#setPanelRviz [data-vgeom]').forEach((el) => { el.value = String(vehicleGeom[el.dataset.vgeom]); });
   driveEdit = { ...driveSettings, cameras: driveSettings.cameras.slice() };
   document.querySelectorAll('#setPanelRviz [data-dset]').forEach((el) => {
     const v = driveEdit[el.dataset.dset];
@@ -3954,6 +4345,19 @@ function openDriveSettingsEdit() {
   renderDriveCamList();
 }
 function commitDriveSettingsEdit(save) {
+  if (save) {
+    const before = JSON.stringify(vehicleGeom);
+    document.querySelectorAll('#setPanelRviz [data-vgeom]').forEach((el) => {
+      const key = el.dataset.vgeom;
+      if (key === 'forward') { vehicleGeom.forward = el.value; return; }
+      const n = Number(el.value);
+      if (Number.isFinite(n) && (n > 0 || key === 'cx' || key === 'cy')) vehicleGeom[key] = n;
+    });
+    if (JSON.stringify(vehicleGeom) !== before) {
+      localStorage.setItem('rosWebVehicleGeom', JSON.stringify(vehicleGeom));
+      setViewPreset('reset');   // 전방 방향이 바뀌었을 수 있으므로 시점 재정렬
+    }
+  }
   if (save && driveEdit) {
     Object.assign(driveSettings, driveEdit);
     resetView2d();
@@ -3974,7 +4378,7 @@ document.querySelectorAll('#setPanelRviz [data-dset]').forEach((el) => {
     if (key === 'range') $('#dsetRangeVal').textContent = `${driveEdit.range} m`;
     if (key === 'camMode') {
       // 직접 선택으로 바꿀 때 비어 있으면 현재 보이는 카메라로 채움
-      if (driveEdit.camMode === 'select' && !driveEdit.cameras.length) driveEdit.cameras = [...liveCameraImgs().keys()];
+      if (driveEdit.camMode === 'select' && !driveEdit.cameras.length) driveEdit.cameras = [...liveCameraImgs().keys()].map(logicalTopic);
       renderDriveCamList();
     }
   });
@@ -4054,7 +4458,7 @@ driveCanvas.addEventListener('wheel', (e) => {
     const wx = view2d.panF + (m.y0 - sy) / m.scale;
     const wy = view2d.panL + (m.cx - sx) / m.scale;
     driveRange2d = Math.max(3, Math.min(250, driveRange2d * f));
-    const scale = m.plotH / (driveRange2d * 1.2);
+    const scale = m.plotH / (driveRange2d + radar2dRear(driveRange2d));
     const y0 = m.padT + driveRange2d * scale;
     view2d.panF = wx - (y0 - sy) / scale;
     view2d.panL = wy - (m.cx - sx) / scale;

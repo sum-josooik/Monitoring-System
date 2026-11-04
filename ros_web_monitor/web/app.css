@@ -2212,3 +2212,34 @@ td.topic { font-weight: 600; font-family: "JetBrains Mono", ui-monospace, Menlo,
   flex: 0 0 auto; width: 16px; height: 16px; min-width: 0; margin: 0; padding: 0; accent-color: var(--accent);
 }
 .dset-cam span { flex: 1 1 auto; text-align: left; }
+
+/* ── RViz 탭 HUD ── */
+.viz-hud { position: absolute; z-index: 4; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+.viz-hud-tl { top: 12px; left: 14px; flex-wrap: wrap; max-width: 60%; }
+.viz-hud-tr { top: 10px; right: 12px; pointer-events: auto; }
+.viz-hint { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.viz-seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 9px; background: rgba(8,13,19,.78); backdrop-filter: blur(6px); }
+.viz-seg button, .viz-chip {
+  height: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--muted); font-size: 11.5px; font-weight: 600; cursor: pointer;
+}
+.viz-chip { border: 1px solid var(--line-strong); background: rgba(8,13,19,.78); height: 30px; border-radius: 9px; }
+.viz-seg button:hover, .viz-chip:hover { color: var(--text); }
+.viz-seg button.active, .viz-chip.active { background: rgba(56,189,248,.18); color: #e6f4ff; box-shadow: inset 0 0 0 1px rgba(56,189,248,.4); }
+.viz-tip {
+  position: absolute; z-index: 6; min-width: 190px; max-width: 260px; padding: 9px 11px; pointer-events: none;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(8,12,18,.93);
+  box-shadow: 0 10px 28px rgba(0,0,0,.5); backdrop-filter: blur(8px); font-size: 12px;
+}
+.viz-tip[hidden] { display: none; }
+.viz-tip b { display: block; font-size: 13.5px; }
+.viz-tip > span { color: var(--muted); font-size: 11.5px; }
+.viz-tip dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 7px 0 5px; }
+.viz-tip dt { color: var(--muted); }
+.viz-tip dd { margin: 0; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px; }
+.viz-tip em { font-style: normal; color: var(--muted); font-size: 10.5px; font-family: "JetBrains Mono", ui-monospace, monospace; word-break: break-all; }
+.viz-panel .viz-alert { top: 46px; }
+.viz-panel[data-vtab="drive3d"] .viz-hud, .viz-panel[data-vtab="radar2d"] .viz-hud,
+.viz-panel[data-vtab="drive3d"] .viz-tip, .viz-panel[data-vtab="radar2d"] .viz-tip { display: none !important; }
+@container vizp (max-width: 700px) { .viz-hint { display: none; } }
+#setPanelRviz [data-vgeom] { width: 90px; height: 30px; }

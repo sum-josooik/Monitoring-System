@@ -126,6 +126,16 @@
           </div>
           <div class="viz-shell">
             <canvas id="vizCanvas"></canvas>
+            <div class="viz-hud viz-hud-tl"><span class="drive-kicker">RVIZ 3D</span><span id="vizSrc" class="drive-src"></span><span class="viz-hint">드래그 회전 · 휠클릭 이동 · 휠 확대 · 박스에 마우스 → 정보</span></div>
+            <div class="viz-hud viz-hud-tr">
+              <div class="viz-seg" id="vizColorMode" title="점 색상">
+                <button data-cmode="layer" type="button">레이어</button>
+                <button data-cmode="height" type="button">높이</button>
+                <button data-cmode="range" type="button">거리</button>
+              </div>
+              <button id="vizLabelToggle" class="viz-chip" type="button" title="라벨 표시">라벨</button>
+            </div>
+            <div id="vizTip" class="viz-tip" hidden></div>
             <div id="vizAlert" class="viz-alert" hidden></div>
 <div class="viz-legend"></div>
             <div id="driveView" class="drive-view" hidden>
@@ -281,6 +291,20 @@
               <div class="vsm-section-title">레이어 설정 <span class="vsm-hint">— 레이어별 이름·색상·토픽 지정, ＋로 추가</span></div>
               <div id="vsmLayerConfig" class="vsm-layer-config"></div>
             </section>
+            <section class="vsm-section">
+              <div class="vsm-section-title">차량 위치 <span class="vsm-hint">— 데이터 좌표계(multi_lidar_merge output_frame) 기준 차체</span></div>
+              <div class="vsm-row">
+                <label class="vsm-field"><span>전방 방향</span>
+                  <select data-vgeom="forward"><option value="+y">+y</option><option value="+x">+x</option><option value="-y">-y</option><option value="-x">-x</option></select>
+                </label>
+                <label class="vsm-field"><span>중심 x (m)</span><input type="number" step="0.1" data-vgeom="cx"></label>
+                <label class="vsm-field"><span>중심 y (m)</span><input type="number" step="0.1" data-vgeom="cy"></label>
+                <label class="vsm-field"><span>길이 (m)</span><input type="number" min="1" max="20" step="0.1" data-vgeom="length"></label>
+                <label class="vsm-field"><span>폭 (m)</span><input type="number" min="0.5" max="5" step="0.1" data-vgeom="width"></label>
+                <label class="vsm-field"><span>높이 (m)</span><input type="number" min="0.5" max="5" step="0.1" data-vgeom="height"></label>
+              </div>
+              <p class="set-hint">기본값은 multi_lidar_merge 의 remove_vehicle 영역(x −1.3~1.7, y −2.5~5.7, 전방 +y)입니다. 거리·방위·근접 경고·주행 뷰가 모두 이 차체를 기준으로 계산됩니다.</p>
+            </section>
             <section class="vsm-section" id="vsmDriveSection">
               <div class="vsm-section-title">주행 뷰 <span class="vsm-hint">— RViz 패널의 3D 주행 · 2D 레이더 탭</span></div>
               <div class="dset-group">
@@ -292,6 +316,7 @@
               </div>
               <div class="vsm-row">
                 <label class="vsm-field"><span>전방 표시 거리 <b id="dsetRangeVal"></b></span><input type="range" min="30" max="150" step="10" data-dset="range"></label>
+                <label class="vsm-field"><span>2D 기본 표시 거리 (m)</span><input type="number" min="5" max="200" step="5" data-dset="range2d"></label>
                 <label class="vsm-field"><span>차로 폭 (m)</span><input type="number" min="2.5" max="5" step="0.1" data-dset="laneWidth"></label>
                 <label class="vsm-field"><span>조향비</span><input type="number" min="8" max="25" step="0.5" data-dset="steerRatio"></label>
                 <label class="vsm-field"><span>축거 (m)</span><input type="number" min="1.5" max="6" step="0.1" data-dset="wheelbase"></label>
@@ -354,6 +379,13 @@
                 <span class="bag-toggle-desc">모든 토픽을 기록합니다 (<code>-a</code>)</span>
               </div>
               <span class="bag-switch"><input type="checkbox" id="bagAll"><i></i></span>
+            </label>
+            <label class="bag-toggle-row">
+              <div class="bag-toggle-text">
+                <span class="bag-toggle-title">대용량 토픽 제외 (권장)</span>
+                <span class="bag-toggle-desc">전체 녹화 시 raw 카메라 영상(compressed 는 기록, AVM 은 유지)·라이다 원본 패킷·Ouster 2D 이미지를 뺍니다. 녹화가 밀려 영상·라이다가 끊기는 것을 막습니다. GPS 경로는 bag 폴더에 함께 저장됩니다.</span>
+              </div>
+              <span class="bag-switch"><input type="checkbox" id="bagLight"><i></i></span>
             </label>
             <div id="bagPicker" class="bag-picker">
               <div class="bag-picker-bar">

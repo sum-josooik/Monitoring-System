@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import tempfile
 import threading
@@ -40,6 +41,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rosidl_runtime_py.utilities import get_message
+from rclpy.serialization import deserialize_message
 try:
     from sensor_msgs_py import point_cloud2
 except Exception:
@@ -613,7 +615,11 @@ class MonitorNode(Node):
         self.gps_track_recording = False
         self.gps_track_points = []
         self.gps_track_started = None
+        self.bag_gps_points = None    # Bag 녹화 중이면 list (GPS 경로 동시 기록)
+        self.play_track = {'file': None, 'status': 'none', 'points': []}   # Play 중인 bag 의 GPS 경로
         self.visual_range_m = 120.0
+        # multi_lidar_merge 입력 라이다별 변환 (topic → (R, t)), 자차 CropBox
+        self.merge_poses, self.merge_crop, self.merge_output = load_merge_poses(self.get_logger())
         self.jtop_monitor = JtopMonitor() if JTOP_AVAILABLE else None
         self.server = None
         self.server_thread = None
@@ -776,6 +782,10 @@ class MonitorNode(Node):
                 callback = lambda msg, topic=name: self.handle_compressed_image(topic, msg)
             elif type_name == 'sensor_msgs/msg/Image' and is_streamable_raw_image_topic(name):
                 callback = lambda msg, topic=name: self.handle_raw_image(topic, msg)
+            elif type_name in HEAVY_RAW_TYPES:
+                # 화면에 쓰지 않는 대용량 메시지(raw 카메라 영상 ~6MB, 라이다 패킷)는 Python 객체로
+                # 역직렬화하지 않고 바이트 그대로 받아 Hz/크기만 집계 (CPU·지연 대폭 감소)
+                callback = lambda data, topic=name, tn=type_name: self.handle_serialized(topic, data, tn)
             elif type_name == 'sensor_msgs/msg/PointCloud2':
                 callback = lambda msg, topic=name: self.handle_pointcloud(topic, msg)
             elif type_name == 'visualization_msgs/msg/MarkerArray':
@@ -789,7 +799,9 @@ class MonitorNode(Node):
                 callback = lambda msg, topic=name: self.handle_gps(topic, msg)
             else:
                 callback = lambda msg, topic=name, tn=type_name: self.handle_generic(topic, msg, tn)
-            sub = self.create_subscription(msg_type, name, callback, qos)
+            raw = type_name in HEAVY_RAW_TYPES and not (
+                type_name == 'sensor_msgs/msg/Image' and is_streamable_raw_image_topic(name))
+            sub = self.create_subscription(msg_type, name, callback, qos, raw=raw)
             self.subscriptions_by_topic[name] = sub
             with self.lock:
                 self.stats[name].last_error = ''
@@ -803,6 +815,17 @@ class MonitorNode(Node):
             stat = self.stats.get(topic)
             if stat:
                 stat.record()
+
+    def handle_serialized(self, topic, data, type_name):
+        with self.lock:
+            stat = self.stats.get(topic)
+            if not stat:
+                return
+            stat.record()
+            if type_name == 'sensor_msgs/msg/Image':
+                stat.last_value = {**parse_image_header(data), 'bytes': len(data)}
+            else:
+                stat.last_value = {'bytes': len(data)}
 
     def handle_generic(self, topic, msg, type_name=''):
         """모든 타입의 fallback 핸들러 — 타이밍 기록 + 값 추출."""
@@ -887,20 +910,27 @@ class MonitorNode(Node):
         if not any(token in lowered for token in ('point', 'lidar', 'ouster', 'scan', 'radar')):
             return
         try:
-            point_count = max(1, msg.width * msg.height)
-            step = max(1, point_count // self.visual_max_points_per_topic)
-            points = []
-            for index, point in enumerate(point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)):
-                if index % step != 0:
-                    continue
-                x, y, z = float(point[0]), float(point[1]), float(point[2])
-                rng = self.visual_range_m
-                if abs(x) <= rng and abs(y) <= rng and -6.0 <= z <= 8.0:
-                    points.append([round(x, 2), round(y, 2), round(z, 2)])
-                if len(points) >= self.visual_max_points_per_topic:
-                    break
+            # numpy 벡터 연산으로 다운샘플 (Python 루프 대비 수십 배 빠름)
+            arr = point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)
+            xyz = np.stack([arr['x'], arr['y'], arr['z']], axis=1).astype(np.float32) if len(arr) else np.zeros((0, 3), np.float32)
+            step = max(1, len(xyz) // max(1, self.visual_max_points_per_topic))
+            xyz = xyz[::step]
+            # 병합 노드 입력 라이다면 같은 변환을 적용해 병합 좌표계로 옮김 (병합 클라우드가 없을 때 대체 표시)
+            base = topic[len(self.play_namespace):] if topic.startswith(self.play_namespace + '/') else topic
+            merge_part = base in self.merge_poses
+            if merge_part:
+                rot, trans = self.merge_poses[base]
+                xyz = xyz @ rot.T + trans
+                lo, hi = self.merge_crop
+                if lo is not None:
+                    inside = np.all((xyz >= lo) & (xyz <= hi), axis=1)
+                    xyz = xyz[~inside]        # 자차 영역 제거 (병합 노드 remove_vehicle 과 동일)
+            rng = self.visual_range_m
+            keep = (np.abs(xyz[:, 0]) <= rng) & (np.abs(xyz[:, 1]) <= rng) & (xyz[:, 2] >= -6.0) & (xyz[:, 2] <= 8.0)
+            points = np.round(xyz[keep][:self.visual_max_points_per_topic], 2).tolist()
             with self.lock:
-                self.visual_points[topic] = {'stamp': _now(), 'topic': topic, 'points': points}
+                self.visual_points[topic] = {'stamp': _now(), 'topic': topic, 'points': points,
+                                             'merge_part': merge_part}
         except Exception as exc:
             with self.lock:
                 stat = self.stats.get(topic)
@@ -992,16 +1022,23 @@ class MonitorNode(Node):
                         'satellites': sats,
                         'stamp': _now(),
                     }
+                    # GPSFix 는 속도(m/s)·진행방향(북 기준 시계방향 deg)을 함께 제공
+                    for key in ('speed', 'track'):
+                        val = getattr(msg, key, None)
+                        if isinstance(val, (int, float)) and math.isfinite(val):
+                            record[key] = round(float(val), 3)
                     # bag 재생 네임스페이스는 실시간 GPS와 분리된 슬롯에 저장
                     # (재생 중에도 실제 차량 GPS를 덮어쓰지 않도록)
                     if topic.startswith(self.play_namespace + '/'):
                         self.gps_data_play = record
                     else:
                         self.gps_data = record
+                        point = [round(time.time(), 2), round(lat, 7), round(lng, 7), round(alt, 2)]
                         if self.gps_track_recording:
                             # 저장 파일에는 절대 시각이 유용하므로 epoch 초 사용 (_now는 monotonic)
-                            self.gps_track_points.append(
-                                [round(time.time(), 2), round(lat, 7), round(lng, 7), round(alt, 2)])
+                            self.gps_track_points.append(point)
+                        if self.bag_gps_points is not None:
+                            self.bag_gps_points.append(point)   # Bag 녹화와 함께 기록
         except AttributeError:
             pass
 
@@ -1381,6 +1418,9 @@ class MonitorNode(Node):
                 'paused': False,
             }
             self.play_ctrl_clients = {}
+        with self.play_lock:
+            self.play_track = {'file': name, 'status': 'loading', 'points': []}
+        threading.Thread(target=self.load_play_track, args=(name, bag_dir), daemon=True).start()
         self.get_logger().info(f'bag 재생 시작: {cmd}')
         return {'ok': True, 'playing': True, 'file': name, 'start_time': self.play_start_time,
                 'topics': topics, 'namespace': self.play_namespace,
@@ -1400,6 +1440,7 @@ class MonitorNode(Node):
             self.play_tmp_dir = None
             self._play_log = None
             self.play_file = None
+            self.play_track = {'file': None, 'status': 'none', 'points': []}
             self.play_start_time = None
             self.play_start_ns = None
             self.play_duration_ns = None
@@ -1472,7 +1513,8 @@ class MonitorNode(Node):
         point_layers.sort(key=lambda item: item['topic'])
         return {
             'range_m': int(self.visual_range_m),
-            'point_layers': point_layers[:12],
+            'point_layers': point_layers[:24],
+            'merge_output': self.merge_output,
             'boxes': box_items[:420],
             'markers': marker_items[:420],
         }
@@ -1508,6 +1550,7 @@ class MonitorNode(Node):
             'gps_track': {
                 'recording': self.gps_track_recording,
                 'points': len(self.gps_track_points),
+                'bag_recording': self.bag_gps_points is not None,
             },
             'bag': self.bag_status(),
             'bag_play': self.play_status(),
@@ -1638,7 +1681,14 @@ class MonitorNode(Node):
             return {'ok': False, 'error': str(exc)}
         return self.list_dir(new_path)
 
-    def start_bag(self, topics=None):
+    # 전체 녹화 시 기본 제외: raw 카메라(compressed 있음, AVM 은 raw 뿐이라 유지), 라이다 원본 패킷,
+    # Ouster 2D 이미지, 클러스터 디버그 점, 재생 중인 /bagplay 토픽.
+    # 2026-11-04 bag(34.9GB/225s)은 raw 영상 때문에 녹화가 밀려 카메라 1~4초 공백, 병합 라이다 7개만 기록됨.
+    BAG_EXCLUDE_ALWAYS = r'^/bagplay/.*'
+    BAG_EXCLUDE_HEAVY = (r'^/(?!avm_cam/)[^/]+/image_raw$|^.*/velodyne_packets$|'
+                         r'^.*Ouster/(nearir|range|reflec|signal)_image$|^/cluster_debug_points$')
+
+    def start_bag(self, topics=None, light=True):
         with self.bag_lock:
             if self.bag_process is not None and self.bag_process.poll() is None:
                 return {'ok': False, 'error': '이미 녹화 중입니다'}
@@ -1655,7 +1705,11 @@ class MonitorNode(Node):
                 # 토픽 선택: 비어있으면 전체(-a), 아니면 지정 토픽만
                 sel = [t for t in (topics or []) if isinstance(t, str) and t.strip()]
                 cmd = ['ros2', 'bag', 'record', '-o', out]
-                cmd += sel if sel else ['-a']
+                if sel:
+                    cmd += sel
+                else:
+                    exclude = self.BAG_EXCLUDE_ALWAYS + ('|' + self.BAG_EXCLUDE_HEAVY if light else '')
+                    cmd += ['-a', '--exclude-regex', exclude]
                 # 디버깅용 로그 캡처
                 self._bag_log = open(os.path.join(self.bag_dir, '.record_log.txt'), 'w')
                 # start_new_session=True → 별도 프로세스 그룹 생성(종료 시 그룹 전체에 SIGINT)
@@ -1670,6 +1724,8 @@ class MonitorNode(Node):
                 self.bag_topics = sel
                 self.bag_start_time = name
                 self.bag_last_saved = None
+                with self.lock:
+                    self.bag_gps_points = []
                 self.get_logger().info(f'bag 녹화 시작: {cmd}')
                 return {'ok': True, 'recording': True, 'start_time': self.bag_start_time,
                         'topics': sel}
@@ -1731,11 +1787,84 @@ class MonitorNode(Node):
                 # 숨김(.) mcap까지 모두 카운트
                 mcap_count = len(glob.glob(os.path.join(saved, '*.mcap'))) \
                     + len(glob.glob(os.path.join(saved, '.*.mcap')))
+            with self.lock:
+                gps_points, self.bag_gps_points = self.bag_gps_points or [], None
+            if saved and gps_points:
+                self.save_bag_gps_track(saved, gps_points)
             self.bag_tmp = None
             self.bag_start_time = None
             self.bag_last_saved = saved
             self.get_logger().info(f'bag 녹화 종료, 저장: {saved} (mcap {mcap_count}개)')
             return {'ok': True, 'recording': False, 'path': saved, 'mcap_count': mcap_count}
+
+    def save_bag_gps_track(self, bag_dir, points, source='live'):
+        """bag 폴더에 gps_track.json 저장 + GPS 경로 목록(log/gps)에도 복사."""
+        payload = {
+            'bag': os.path.basename(bag_dir),
+            'source': source,
+            'started': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(points[0][0])),
+            'ended': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(points[-1][0])),
+            'point_count': len(points),
+            'points': points,   # [unix_stamp, lat, lng, alt]
+        }
+        text = json.dumps(payload)
+        try:
+            (Path(bag_dir) / 'gps_track.json').write_text(text, encoding='utf-8')
+        except Exception as exc:
+            self.get_logger().warn(f'bag GPS 경로 저장 실패: {exc}')
+        try:
+            self.gps_track_dir.mkdir(parents=True, exist_ok=True)
+            (self.gps_track_dir / f'track_bag_{os.path.basename(bag_dir)}.json').write_text(text, encoding='utf-8')
+        except Exception:
+            pass
+
+    def load_play_track(self, name, bag_dir):
+        """재생 bag 의 GPS 경로: gps_track.json 이 있으면 사용, 없으면 bag 의 GPS 토픽에서 추출 후 캐시."""
+        def done(status, points, source=''):
+            with self.play_lock:
+                if self.play_track.get('file') == name:
+                    self.play_track = {'file': name, 'status': status, 'points': points, 'source': source}
+
+        cache = Path(bag_dir) / 'gps_track.json'
+        try:
+            if cache.exists():
+                data = json.loads(cache.read_text(encoding='utf-8'))
+                done('ready', data.get('points', []), data.get('source', 'file'))
+                return
+        except Exception:
+            pass
+        try:
+            import rosbag2_py
+            meta = yaml.safe_load((Path(bag_dir) / 'metadata.yaml').read_text())
+            info = (meta or {}).get('rosbag2_bagfile_information', {}) or {}
+            storage = info.get('storage_identifier') or 'mcap'
+            gps_topics = {}
+            for t in info.get('topics_with_message_count', []) or []:
+                tm = (t or {}).get('topic_metadata', {}) or {}
+                if ('GPSFix' in tm.get('type', '') or 'NavSatFix' in tm.get('type', '')) and t.get('message_count', 0):
+                    gps_topics[tm['name']] = tm['type']
+            if not gps_topics:
+                done('none', [])
+                return
+            topic = '/gpsfix' if '/gpsfix' in gps_topics else sorted(gps_topics)[0]
+            msg_type = get_message(gps_topics[topic])
+            reader = rosbag2_py.SequentialReader()
+            reader.open(rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id=storage),
+                        rosbag2_py.ConverterOptions('cdr', 'cdr'))
+            reader.set_filter(rosbag2_py.StorageFilter(topics=[topic]))
+            points = []
+            while reader.has_next():
+                _, data, stamp = reader.read_next()
+                msg = deserialize_message(data, msg_type)
+                lat, lng = float(msg.latitude), float(msg.longitude)
+                if math.isfinite(lat) and math.isfinite(lng) and abs(lat) <= 90 and abs(lng) <= 180 and (lat or lng):
+                    points.append([round(stamp / 1e9, 2), round(lat, 7), round(lng, 7), round(float(msg.altitude), 2)])
+            done('ready' if points else 'none', points, f'bag:{topic}')
+            if points:
+                self.save_bag_gps_track(str(bag_dir), points, source=f'bag:{topic}')
+        except Exception as exc:
+            self.get_logger().warn(f'bag GPS 경로 추출 실패: {exc}')
+            done('error', [])
 
     # ── 시스템 전원 제어 ─────────────────────────────────────────────────
     def system_power(self, action):
@@ -1918,6 +2047,64 @@ def read_uptime():
     except Exception:
         return 0
 
+def load_merge_poses(logger=None):
+    """multi_lidar_merge.yaml 에서 입력 토픽별 장착 변환(R=Rz·Ry·Rx, t)과 remove_vehicle 박스를 읽는다."""
+    poses, crop, output = {}, (None, None), ''
+    try:
+        share = Path(get_package_share_directory('multi_lidar_merge')) if get_package_share_directory else None
+        path = share / 'config' / 'multi_lidar_merge.yaml' if share else None
+        if not path or not path.exists():
+            return poses, crop, output
+        params = (yaml.safe_load(path.read_text()) or {}).get('multi_lidar_merge', {}).get('ros__parameters', {})
+        scale = math.pi / 180.0 if params.get('angles_in_degrees') else 1.0
+        output = str(params.get('output_topic', '') or '')
+        lidars = params.get('lidars', {}) or {}
+        for topic, name in zip(params.get('input_topics', []) or [], params.get('lidar_names', []) or []):
+            pose = lidars.get(name) or {}
+            if not pose.get('enabled', True):
+                continue
+            r, p, y = (float(pose.get(k, 0.0)) * scale for k in ('roll', 'pitch', 'yaw'))
+            cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+            rot = np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                            [-sp, cp * sr, cp * cr]], np.float32)
+            trans = np.array([float(pose.get(k, 0.0)) for k in ('x', 'y', 'z')], np.float32)
+            poses[topic] = (rot, trans)
+        rv = params.get('remove_vehicle', {}) or {}
+        if rv.get('enabled', True) and rv.get('min') and rv.get('max'):
+            crop = (np.array(rv['min'], np.float32), np.array(rv['max'], np.float32))
+    except Exception as exc:
+        if logger:
+            logger.warn(f'multi_lidar_merge 설정 읽기 실패: {exc}')
+    return poses, crop, output
+
+
+# 역직렬화 없이(raw=True) 구독하는 대용량 타입
+HEAVY_RAW_TYPES = {
+    'sensor_msgs/msg/Image',
+    'velodyne_msgs/msg/VelodyneScan',
+    'ouster_sensor_msgs/msg/PacketMsg',
+}
+
+
+def parse_image_header(data):
+    """직렬화된(CDR) sensor_msgs/Image 앞부분에서 width/height/encoding 만 읽는다."""
+    try:
+        le = data[1] == 1                      # 캡슐화 헤더: 0x0001 = little endian
+        order = '<' if le else '>'
+        off = 4 + 8                            # 캡슐화(4) + stamp(sec, nanosec)
+        (n,) = struct.unpack_from(order + 'I', data, off)
+        off += 4 + n                           # frame_id 문자열(널 포함)
+        off = 4 + ((off - 4 + 3) & ~3)         # 4바이트 정렬 (캡슐화 이후 기준)
+        height, width = struct.unpack_from(order + 'II', data, off)
+        off += 8
+        (n,) = struct.unpack_from(order + 'I', data, off)
+        enc = bytes(data[off + 4:off + 4 + max(0, n - 1)]).decode('ascii', 'replace')
+        return {'width': int(width), 'height': int(height), 'encoding': enc}
+    except Exception:
+        return {}
+
+
 def is_streamable_raw_image_topic(topic):
     lowered = topic.lower()
     return 'result_image' in lowered or lowered.endswith('/avm_cam/image_raw')
@@ -2092,6 +2279,10 @@ def make_handler(node):
             elif parsed.path == '/api/gps/track/load':
                 name = parse_qs(parsed.query).get('file', [''])[0]
                 self.serve_json(node.load_gps_track(name))
+            elif parsed.path == '/api/bag/play/track':
+                with node.play_lock:
+                    track = dict(node.play_track)
+                self.serve_json({'ok': True, **track})
             elif parsed.path == '/api/bag/play/list':
                 self.serve_json(node.list_play_bags())
             elif parsed.path == '/api/fs/list':
@@ -2209,15 +2400,17 @@ def make_handler(node):
                     self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
             elif parsed.path == '/api/bag/start':
                 topics = None
+                light = True
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     if length > 0:
                         body = json.loads(self.rfile.read(length))
                         if not body.get('all', False):
                             topics = body.get('topics', [])
+                        light = bool(body.get('light', True))
                 except Exception:
                     topics = None
-                self.serve_json(node.start_bag(topics))
+                self.serve_json(node.start_bag(topics, light=light))
             elif parsed.path == '/api/bag/stop':
                 self.serve_json(node.stop_bag())
             elif parsed.path == '/api/bag/config':
