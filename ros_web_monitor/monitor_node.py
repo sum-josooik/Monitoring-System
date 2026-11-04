@@ -572,6 +572,7 @@ class MonitorNode(Node):
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8080)
         self.declare_parameter('stream_port', 8081)
+        self.declare_parameter('stream_port_count', 3)
         self.declare_parameter('scan_period_sec', 2.0)
         self.declare_parameter('rate_window_sec', 5.0)
         self.declare_parameter('subscribe_all', True)
@@ -582,6 +583,7 @@ class MonitorNode(Node):
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
         self.stream_port = int(self.get_parameter('stream_port').value)
+        self.stream_port_count = max(1, int(self.get_parameter('stream_port_count').value))
         self.scan_period_sec = float(self.get_parameter('scan_period_sec').value)
         self.rate_window_sec = float(self.get_parameter('rate_window_sec').value)
         self.subscribe_all = bool(self.get_parameter('subscribe_all').value)
@@ -664,16 +666,25 @@ class MonitorNode(Node):
         self.server = ThreadingHTTPServer((self.host, self.port), handler)
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
-        # 카메라 MJPEG 전용 보조 서버: 브라우저의 호스트:포트당 동시연결 한도(~6) 때문에
-        # SSE + 카메라 5개가 메인 포트를 다 차지하면 API fetch가 실패하므로 포트를 분리한다.
-        self.stream_server = None
-        if self.stream_port and self.stream_port != self.port:
-            try:
-                self.stream_server = ThreadingHTTPServer((self.host, self.stream_port), handler)
-                threading.Thread(target=self.stream_server.serve_forever, daemon=True).start()
-            except OSError as exc:
-                self.get_logger().warn(f'스트림 포트 {self.stream_port} 사용 불가 ({exc}) — 메인 포트로 스트리밍')
-                self.stream_server = None
+        # 카메라 MJPEG 전용 보조 서버들: 브라우저는 호스트:포트당 동시연결을 6개로 제한하므로
+        # 메인 포트와 분리하고, 포트를 여러 개(stream_port ~ stream_port+count-1) 열어
+        # 브라우저가 슬롯별로 나눠 접속하게 한다 (포트 3개 → 카메라 최대 18대).
+        self.stream_servers = []
+        self.stream_ports = []
+        if self.stream_port:
+            for port in range(self.stream_port, self.stream_port + self.stream_port_count):
+                if port == self.port:
+                    continue
+                try:
+                    srv = ThreadingHTTPServer((self.host, port), handler)
+                except OSError as exc:
+                    self.get_logger().warn(f'스트림 포트 {port} 사용 불가 ({exc})')
+                    continue
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                self.stream_servers.append(srv)
+                self.stream_ports.append(port)
+        if not self.stream_ports:
+            self.get_logger().warn('스트림 포트를 하나도 열지 못함 — 메인 포트로 스트리밍')
 
     def log_http_once(self):
         if not self._logged_http:
@@ -698,9 +709,9 @@ class MonitorNode(Node):
         if self.server:
             self.server.shutdown()
             self.server.server_close()
-        if getattr(self, 'stream_server', None):
-            self.stream_server.shutdown()
-            self.stream_server.server_close()
+        for srv in getattr(self, 'stream_servers', []):
+            srv.shutdown()
+            srv.server_close()
         super().destroy_node()
 
     def scan_topics(self):
@@ -1482,7 +1493,8 @@ class MonitorNode(Node):
         active = sum(1 for item in topics if item['active'])
         return {
             'time': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'stream_port': self.stream_port if getattr(self, 'stream_server', None) else None,
+            'stream_port': self.stream_ports[0] if getattr(self, 'stream_ports', None) else None,
+            'stream_ports': list(getattr(self, 'stream_ports', [])),
             'topic_count': len(topics),
             'active_count': active,
             'camera_count': len(cameras),

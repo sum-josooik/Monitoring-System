@@ -4,9 +4,9 @@ ROS 2 차량의 센서, 인식 결과, 시스템 상태를 브라우저 한 화�
 ROS 2 노드 하나(`monitor_node`)가 모든 토픽을 구독하고, 내장 HTTP 서버로 대시보드를 제공합니다.
 별도 웹 서버나 Node.js는 필요 없습니다.
 
-![ROS Web Monitor](docs/overview_20261104.jpg)
+![ROS Web Monitor](docs/overview_20261104_1616.jpg)
 
-*실차 화면 (2026-11-04): 토픽 117개(활성 86), GMSL 카메라 8대 + AVM, RViz 패널의 3D 주행 탭(트랙·클러스터·선행 차량·카메라 PIP), GNSS 위치(위성 31개). 번호판은 가림 처리*
+*실차 화면 (2026-11-04 16:16): GMSL 카메라 8대 + AVM 9개 슬롯 모두 표시(스트림 포트 3개로 분산), RViz 패널의 3D 주행 탭(트랙·클러스터·선행 차량·카메라 PIP), GNSS 위치(위성 31개). 번호판은 가림 처리*
 
 ## 주요 기능
 
@@ -15,7 +15,7 @@ ROS 2 노드 하나(`monitor_node`)가 모든 토픽을 구독하고, 내장 HTT
 | **Topic Health** | 전체 토픽의 상태(active / idle / error), 주기(Hz), 마지막 수신 후 경과 시간. 검색, 그룹 필터, 행을 펼쳐 최근 메시지 값 확인 |
 | **센서 그룹** | Cameras · LiDAR · Radar · Localization · Vehicle/CAN · Perception별 활성 토픽 수 요약 |
 | **시스템 (Jetson)** | jtop 기반 CPU 코어별 사용률, GPU, 메모리, 온도, HW 엔진, 전원 모드 |
-| **Camera Preview** | `Image` / `CompressedImage` 토픽을 MJPEG로 미리보기. 슬롯 추가, 삭제, 순서 변경, 열 수 조절. 상태 배지: `LIVE` / `WAIT` / `NO SIGNAL`(3초 이상 프레임 없음). 영상을 클릭하면 크게 보기(←/→ 로 카메라 전환, Esc 닫기) |
+| **Camera Preview** | `Image` / `CompressedImage` 토픽을 MJPEG로 미리보기. 슬롯 추가, 삭제, 순서 변경, 열 수 조절. 상태 배지: `LIVE` / `WAIT` / `NO SIGNAL`(3초 이상 프레임 없음). 영상을 클릭하면 크게 보기(←/→ 로 카메라 전환, Esc 닫기). 슬롯은 스트림 포트 여러 개에 나눠 연결되어 6개를 넘어도 모두 표시 |
 | **RViz Monitor** | 탭 3개: **RViz**(PointCloud2, MarkerArray, 레이더, 클러스터, 트랙 3D 표시. Top/Front/Left/Right 시점, 레이어 토글, 근접 장애물 경고 배너) / **3D 주행** / **2D 레이더**. 자세한 내용은 [주행 뷰](#주행-뷰-3d-주행--2d-레이더) |
 | **GPS Map** | `NavSatFix` / `GPSFix` 위치를 Leaflet 지도에 표시. 이동 경로 기록, 저장, 불러오기 |
 | **Vehicle Monitor** | `/acu_ck2_ver2` 기반 기어, 조향, 페달, 바퀴 속도, 배터리, 모터 토크 게이지 |
@@ -30,9 +30,9 @@ ROS 2 노드 하나(`monitor_node`)가 모든 토픽을 구독하고, 내장 HTT
 
 RViz Monitor 패널 상단의 **3D 주행**, **2D 레이더** 탭입니다. 트랙, 클러스터, 레이더, LiDAR, 차량 정보, 카메라를 한 화면에 모아 운전자 시점으로 보여 줍니다.
 
-| 3D 주행 (카메라: 전체, 배치: 차량 둘레) | 2D 레이더 (약 30 m로 확대) |
+| 3D 주행 (카메라: 전체 9대, 배치: 차량 둘레) | 2D 레이더 (약 30 m로 확대, 눈금 5 m) |
 |---|---|
-| ![3D 주행](docs/drive3d_20261104.jpg) | ![2D 레이더](docs/radar2d_20261104.jpg) |
+| ![3D 주행](docs/drive3d_20261104_1616.jpg) | ![2D 레이더](docs/radar2d_20261104_1616.jpg) |
 
 **화면 구성**
 
@@ -60,7 +60,7 @@ RViz Monitor 패널 상단의 **3D 주행**, **2D 레이더** 탭입니다. 트�
 
 **설정**: 패널의 ⚙ 또는 상단 ⚙ → **RViz** 탭 아래쪽 **주행 뷰**, **주행 뷰 카메라** 섹션에서 바꾸고 **저장**을 누릅니다. 값은 다른 화면 설정과 함께 백업 파일에 들어갑니다.
 
-<img src="docs/settings_drive_20261104.jpg" alt="주행 뷰 설정" width="440">
+<img src="docs/settings_drive_20261104_1616.jpg" alt="주행 뷰 설정" width="440">
 
 | 항목 | 기본값 | 설명 |
 |---|---|---|
@@ -74,7 +74,7 @@ RViz Monitor 패널 상단의 **3D 주행**, **2D 레이더** 탭입니다. 트�
 
 Camera Preview의 영상이나 주행 뷰의 카메라 타일을 클릭하면 크게 볼 수 있습니다. **‹ ›** 버튼이나 **←/→** 키로 카메라를 바꾸고, **Esc**나 바깥 클릭으로 닫습니다. 제목줄에 토픽, 해상도, 마지막 프레임 경과 시간이 나옵니다.
 
-![카메라 확대 보기](docs/camera_zoom_20261104.jpg)
+![카메라 확대 보기](docs/camera_zoom_20261104_1616.jpg)
 
 확대 보기와 주행 뷰 카메라는 Camera Preview에 이미 열려 있는 영상을 다시 그리는 방식이라 **브라우저 연결을 추가로 쓰지 않습니다.** 그래서 Camera Preview 슬롯에 없는 카메라는 표시할 수 없습니다.
 
@@ -112,7 +112,8 @@ ros2 launch ros_web_monitor monitor.launch.py host:=0.0.0.0 port:=8080
 |---|---|---|
 | `host` | `0.0.0.0` (launch: `192.168.1.100`) | HTTP 서버 바인드 주소 |
 | `port` | `8080` | 대시보드, API 포트 |
-| `stream_port` | `8081` | 카메라 MJPEG 스트림 전용 포트. 메인 포트의 브라우저 동시 연결 한도를 보호하기 위해 분리 |
+| `stream_port` | `8081` | 카메라 MJPEG 스트림 전용 첫 포트. 메인 포트의 브라우저 동시 연결 한도를 보호하기 위해 분리 |
+| `stream_port_count` | `3` | 스트림 포트 개수(`stream_port` ~ `stream_port+count-1`, 기본 8081~8083). 브라우저는 포트당 동시 연결이 6개라서 카메라 슬롯을 포트에 나눠 배정합니다(포트 3개 → 최대 18대) |
 | `scan_period_sec` | `2.0` | 토픽 목록 갱신 주기 |
 | `rate_window_sec` | `5.0` | Hz 계산 구간 |
 | `subscribe_all` | `true` | 모든 토픽 자동 구독 |
@@ -155,7 +156,7 @@ echo "$USER ALL=(root) NOPASSWD: /usr/sbin/shutdown, /usr/sbin/reboot" \
 | GET | `/`, `/app.js`, `/app.css` | 대시보드 |
 | GET | `/api/state` | 전체 상태 스냅샷 (토픽, 카메라, 시스템, GPS, 차량 등) |
 | GET | `/events` | 상태 실시간 푸시 (Server-Sent Events) |
-| GET | `/stream?topic=<topic>` | 카메라 MJPEG 스트림 (`stream_port`에서도 제공) |
+| GET | `/stream?topic=<topic>` | 카메라 MJPEG 스트림 (각 스트림 포트에서도 제공) |
 | GET | `/api/ui/default-settings` | `UI/` 폴더의 최신 화면 설정 JSON |
 | GET | `/api/bag/play/list` | 재생 가능한 bag 목록 |
 | GET | `/api/gps/track/list`, `/api/gps/track/load?file=` | 저장된 GPS 이동 경로 |
@@ -190,9 +191,9 @@ ros_web_monitor/
 - **재부팅 / 종료 버튼 실패**: 위 sudoers 설정을 확인하세요.
 - **주행 뷰 하단이 `—`, 배지가 "차량 데이터 없음"**: `/acu_ck2_ver2`가 들어오지 않는 상태입니다(CAN 미연결 등). 객체·레이더 표시는 영향이 없고, 예상 경로는 직진으로 그립니다.
 - **주행 뷰에 카메라가 안 나옴**: 선택한 카메라가 Camera Preview 슬롯에 열려 있는지 확인하세요. 설정의 카메라 목록에 "미리보기에 없음"으로 표시됩니다.
+- **일부 카메라 슬롯만 검은 화면 (`LIVE`인데 영상 없음)**: 브라우저의 포트당 동시 연결 한도(6개)에 걸린 경우입니다. 스트림 포트(기본 8081~8083)가 모두 열렸는지 시작 로그의 `스트림 포트 … 사용 불가` 경고를 확인하고, 방화벽이 있다면 이 포트들을 허용하세요. 카메라가 18대를 넘으면 `stream_port_count`를 늘립니다.
 - **GPS 패널이 비어 있음**: 수신기가 위치를 계산하지 못한 상태입니다(`/pvtgeodetic`의 `nr_sv: 255`, `mode: 0`). 실내이거나 안테나 연결 문제일 수 있으니, 하늘이 보이는 곳에서 확인하세요.
 
 ## 알려진 문제
 
-- **카메라 슬롯이 6개를 넘으면 일부 슬롯이 검은 화면으로 나옴**: 브라우저는 한 서버 주소(호스트:포트)에 동시에 열 수 있는 HTTP 연결이 6개로 제한됩니다. 모든 MJPEG 스트림이 `stream_port` 하나를 쓰기 때문에 7번째 슬롯부터는 연결을 열지 못합니다. 토픽 자체는 정상으로 수신되므로 배지는 `LIVE`로 표시됩니다. 검은 슬롯의 카메라는 확대 보기와 주행 뷰에도 나오지 않습니다. 지금은 카메라 슬롯을 6개 이하로 두는 방법으로 피할 수 있습니다.
 - **차선은 실제 인식 결과가 아님**: 차선 인식 토픽이 없으면 주행 뷰의 차로는 조향각 기반 예상 경로입니다. 선행 차량(LEAD) 판단도 이 예상 차로를 기준으로 합니다.

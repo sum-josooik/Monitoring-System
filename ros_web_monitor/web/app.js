@@ -227,6 +227,7 @@ function render(payload) {
   state.gps = payload.gps || null;
   state.gpsTrack = payload.gps_track || null;
   state.streamPort = payload.stream_port || null;
+  state.streamPorts = payload.stream_ports || (payload.stream_port ? [payload.stream_port] : []);
   state.vehicle = payload.vehicle || null;
   state.gpsPlay = payload.gps_play || null;
   state.vehiclePlay = payload.vehicle_play || null;
@@ -2270,8 +2271,12 @@ function refreshCameraStream(card, slot, options) {
     applyCameraSignalState(card, null, slot);
     return;
   }
-  // 카메라 스트림은 보조 포트로 분리 (메인 포트의 브라우저 동시연결 한도 보호)
-  const base = state.streamPort ? `${location.protocol}//${location.hostname}:${state.streamPort}` : '';
+  // 카메라 스트림은 보조 포트로 분리하고, 슬롯 순서대로 여러 포트에 나눠 접속
+  // (브라우저의 호스트:포트당 동시연결 한도 6 → 7번째 슬롯부터 검은 화면 방지)
+  const ports = state.streamPorts || [];
+  const slotIdx = Math.max(0, view.cameraLayout.slots.findIndex((sl) => sl.id === slot.id));
+  const port = ports.length ? ports[slotIdx % ports.length] : null;
+  const base = port ? `${location.protocol}//${location.hostname}:${port}` : '';
   const streamUrl = `${base}${camera.stream_url}${camera.stream_url.includes('?') ? '&' : '?'}id=${slot.id}`;
   if (img.dataset.topic !== camera.name) {
     img.dataset.topic = camera.name;
