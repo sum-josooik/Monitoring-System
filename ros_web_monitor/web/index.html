@@ -79,11 +79,13 @@
             <label class="select"><span>Group</span><select id="groupFilter"><option value="all">All</option><option value="cameras">Cameras</option><option value="lidar">LiDAR</option><option value="radar">Radar</option><option value="localization">Localization</option><option value="vehicle_can">Vehicle/CAN</option><option value="perception">Perception</option></select></label>
             <label class="check-row compact"><input id="activeOnly" type="checkbox"><span>Active only</span></label>
           </div>
-          <div class="table-wrap"><table><thead><tr><th>State</th><th>Topic</th><th>Hz</th><th>Age</th></tr></thead><tbody id="topicRows"></tbody></table></div>
+          <div id="topicSummary" class="topic-summary"></div>
+          <div id="topicGroupChips" class="chip-row"></div>
+          <div class="table-wrap"><table class="topic-table"><thead><tr><th></th><th>Topic</th><th>Hz</th><th>Age</th></tr></thead><tbody id="topicRows"></tbody></table></div>
         </section>
 
         <section class="panel groups-panel" data-panel="groups" draggable="true">
-          <div class="section-head"><button class="drag-handle" type="button" title="drag panel">::</button><div><h2>Sensor Groups</h2><span>grouped by topic role</span></div></div>
+          <div class="section-head"><button class="drag-handle" type="button" title="drag panel">::</button><div><h2>Sensor Health</h2><span>센서 그룹별 수신 상태 · 카드를 누르면 토픽 목록</span></div></div>
           <div id="groupGrid" class="group-grid"></div>
         </section>
 
@@ -160,6 +162,11 @@
           <div class="section-head">
             <button class="drag-handle" type="button" title="drag panel">::</button>
             <div><h2>Camera Preview</h2><span id="cameraStatus"></span></div>
+            <nav class="viz-tabs cam-tabs" id="camTabs">
+              <button type="button" data-camtab="cam" class="active">카메라 <em></em></button>
+              <button type="button" data-camtab="perc">인지 카메라 <em></em></button>
+              <button type="button" data-camtab="road">도로 인지 <em></em></button>
+            </nav>
           </div>
           <div id="cameraEditBar" class="camera-edit-bar" hidden>
             <span class="cam-edit-label">열 수</span>
@@ -173,6 +180,8 @@
             <button id="doneCameraLayout" type="button">완료</button>
           </div>
           <div id="cameraGrid" class="camera-grid"></div>
+          <div id="cameraGridPerc" class="camera-grid cam-grid-bg"></div>
+          <div id="cameraGridRoad" class="camera-grid cam-grid-bg"></div>
         </section>
 
         <section class="panel gps-panel" data-panel="gps" draggable="true">
@@ -250,6 +259,8 @@
           <button class="set-tab active" data-settab="header" type="button">화면 구성</button>
           <button class="set-tab" data-settab="bag" type="button">Bag 녹화</button>
           <button class="set-tab" data-settab="rviz" type="button">RViz</button>
+          <button class="set-tab" data-settab="road" type="button">도로 인지</button>
+          <button class="set-tab" data-settab="lens" type="button">카메라 보정</button>
           <button class="set-tab" data-settab="backup" type="button">백업</button>
         </nav>
         <div class="vsm-body">
@@ -344,6 +355,81 @@
               <div id="dsetCamList" class="dset-cam-list"></div>
               <p class="set-hint">Camera Preview 슬롯에 열려 있는 카메라 영상을 재사용합니다(브라우저 연결 추가 없음). 슬롯에 없는 카메라는 표시되지 않습니다. 차량 둘레 배치는 토픽 이름(Front / Left / Right / Rear / avm)으로 위치를 정합니다.</p>
             </section>
+          </div>
+
+          <div id="setPanelRoad" class="set-panel" hidden>
+            <div class="road-bar">
+              <label class="road-cam"><span>카메라</span><select id="roadCam"></select></label>
+              <span id="roadBadge" class="road-badge"></span>
+              <div class="road-actions">
+                <button id="roadSave" type="button" class="backup-btn">저장</button>
+                <button id="roadRevert" type="button" class="backup-btn">편집 취소</button>
+                <button id="roadReset" type="button" class="backup-btn">기본값으로 되돌리기</button>
+              </div>
+              <span id="roadStatus" class="road-status" role="status"></span>
+            </div>
+            <div class="road-views">
+              <figure class="road-editor">
+                <canvas id="roadCanvas"></canvas>
+                <img id="roadRaw" class="road-raw" alt="">
+                <div class="road-zoom">
+                  <button id="roadZoomOut" type="button" title="축소" aria-label="축소">−</button>
+                  <span id="roadZoomLabel">100%</span>
+                  <button id="roadZoomIn" type="button" title="확대" aria-label="확대">+</button>
+                  <button id="roadZoomFit" type="button">맞춤</button>
+                  <button id="roadFreeze" type="button" aria-pressed="false">화면 정지</button>
+                  <label class="check-row road-vplock"><input id="roadVpLock" type="checkbox" checked><span>소실점 고정</span></label>
+                </div>
+                <figcaption>꼭짓점·소실점 드래그: 범위 조절 · 휠: 확대/축소 · 빈 곳 드래그: 화면 이동 · 더블클릭: 맞춤</figcaption>
+              </figure>
+              <div class="road-side">
+                <div class="road-previews">
+                  <figure>
+                    <figcaption>위에서 본 모습 (저장 전 미리보기)</figcaption>
+                    <canvas id="roadBev"></canvas>
+                  </figure>
+                  <figure>
+                    <figcaption>인지 결과 (저장 후 반영)</figcaption>
+                    <div class="road-result"><img id="roadResult" alt=""></div>
+                  </figure>
+                </div>
+                <div class="road-fields">
+                  <label><span>가까운 변 거리 (m)</span><input id="roadNear" type="number" min="0" max="119" step="0.5"></label>
+                  <label><span>먼 변 거리 (m)</span><input id="roadFar" type="number" min="1" max="120" step="0.5"></label>
+                  <label><span>폭 (m)</span><input id="roadWidth" type="number" min="0.5" max="60" step="0.5"></label>
+                </div>
+                <div class="road-lanes" role="group" aria-label="감싼 차로 수로 폭 입력">
+                  <span>감싼 차로 수</span>
+                  <button type="button" data-lanes="1">1</button>
+                  <button type="button" data-lanes="2">2</button>
+                  <button type="button" data-lanes="3">3</button>
+                  <button type="button" data-lanes="4">4</button>
+                </div>
+                <label class="check-row road-cal"><input id="roadCalibrated" type="checkbox"><span>거리·폭을 실제로 잰 값으로 입력함</span></label>
+                <ul class="road-guide">
+                  <li><b>맞추는 순서:</b> 곧은 도로에서 화면 정지 → 소실점을 끌어 파란 연장선을 차선에 겹치기 → 왼쪽 미리보기에서 차선이 <b>세로로 나란한지</b> 확인.</li>
+                  <li>꼭짓점을 차선 위에 정확히 올릴 필요는 없습니다. 미리보기가 기준입니다.</li>
+                  <li><b>도로 전체</b>를 감싸되 잔디·하늘·차체는 빼세요.</li>
+                  <li>폭·거리는 미리보기의 눈금(가로 3.5 m, 세로 5 m)이 실제 차로 폭·점선 길이와 맞게 조정하세요.</li>
+                  <li>측면 카메라는 차선이 미리보기에서 <b>가로로 나란하면</b> 맞습니다. 어안 렌즈라 끝부분이 조금 휘는 것은 정상입니다.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div id="setPanelLens" class="set-panel" hidden>
+            <div class="lens-apply">
+              <b>보정값 적용</b>
+              <label><input type="checkbox" data-calapply="camera"> 카메라 탭</label>
+              <label><input type="checkbox" data-calapply="perception"> 인지 카메라 탭</label>
+              <label><input type="checkbox" data-calapply="road"> 도로 인지 탭</label>
+              <span id="lensApplyMsg"></span>
+            </div>
+            <div class="lens-bar">
+              <span id="lensStatus"></span>
+              <a id="lensOpen" target="_blank" rel="noopener" hidden>새 창으로 열기</a>
+            </div>
+            <iframe id="lensFrame" title="카메라 렌즈 보정" hidden></iframe>
           </div>
 
           <div id="setPanelBackup" class="set-panel" hidden>

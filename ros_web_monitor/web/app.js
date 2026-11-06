@@ -55,13 +55,32 @@ const view = {
   lastY: 0,
   layout: localStorage.getItem('rosWebLayout') || 'balanced',
   customLayout: JSON.parse(localStorage.getItem('rosWebCustomLayout') || 'null'),
-  cameraLayout: (() => {
-    const saved = JSON.parse(localStorage.getItem('rosWebCameraLayout') || 'null');
-    if (saved && saved.slots) return saved;
-    // 구버전 rosWebCameraSlots 마이그레이션
-    const oldSlots = JSON.parse(localStorage.getItem('rosWebCameraSlots') || 'null') || defaults.slice();
-    return { cols: 2, slots: oldSlots.map((t, i) => ({ id: 'c' + i, topic: t || '' })) };
-  })(),
+  // Camera Preview 탭: cam = 카메라(원본), perc = 인지 카메라(object_3d 결과). 탭마다 슬롯·열 수를 따로 저장
+  cameraLayouts: {
+    cam: (() => {
+      const saved = JSON.parse(localStorage.getItem('rosWebCameraLayout') || 'null');
+      if (saved && saved.slots) return saved;
+      // 구버전 rosWebCameraSlots 마이그레이션
+      const oldSlots = JSON.parse(localStorage.getItem('rosWebCameraSlots') || 'null') || defaults.slice();
+      return { cols: 2, slots: oldSlots.map((t, i) => ({ id: 'c' + i, topic: t || '' })) };
+    })(),
+    perc: (() => {
+      const saved = JSON.parse(localStorage.getItem('rosWebPercCameraLayout') || 'null');
+      if (saved && saved.slots) return saved;
+      const cams = ['Front_120_Camera', 'Left_Front_Camera', 'Right_Front_Camera', 'Left_Rear_Camera', 'Rear_Camera', 'Right_Rear_Camera'];
+      return { cols: 3, slots: cams.map((c, i) => ({ id: 'p' + i, topic: `/object_3d/${c}/result_image/compressed` })) };
+    })(),
+    // 도로 인지: road_perception 결과 (차선·노면표시·신호등·표지판)
+    road: (() => {
+      const saved = JSON.parse(localStorage.getItem('rosWebRoadCameraLayout') || 'null');
+      if (saved && saved.slots) return saved;
+      const cams = ['Front_120_Camera', 'Front_60_Camera', 'Front_30_Camera', 'Rear_Camera',
+                    'Left_Front_Camera', 'Right_Front_Camera', 'Left_Rear_Camera', 'Right_Rear_Camera'];
+      return { cols: 4, slots: cams.map((c, i) => ({ id: 'r' + i, topic: `/road_perception/${c}/result_image/compressed` })) };
+    })(),
+  },
+  camTab: ['perc', 'road'].includes(localStorage.getItem('rosWebCamTab')) ? localStorage.getItem('rosWebCamTab') : 'cam',
+  get cameraLayout() { return this.cameraLayouts[this.camTab]; },
   cameraEditMode: false,
   cameraOptionSig: '',
   vizSettings: (() => {
@@ -135,6 +154,9 @@ const groupGrid = $('#groupGrid');
 const systemGrid = $('#systemGrid');
 const systemSubtitle = $('#systemSubtitle');
 const cameraGrid = $('#cameraGrid');
+const CAM_GRIDS = { cam: cameraGrid, perc: $('#cameraGridPerc'), road: $('#cameraGridRoad') };
+const CAM_TABS = ['cam', 'perc', 'road'];
+const CAM_SLOT_PREFIX = { cam: 'c', perc: 'p', road: 'r' };
 const cameraStatus = $('#cameraStatus');
 const topicRows = $('#topicRows');
 const searchInput = $('#searchInput');
@@ -226,13 +248,44 @@ applyHeaderConfig();  // 저장된 헤더 구성(이름/순서/표시) 적용
 view.zoom = view.vizSettings.defaultZoom || 1;  // 저장된 기본 확대값 적용
 zoomRange.value = view.zoom.toFixed(2);
 
+// ── 좌측 레일 디자인: 그룹 메타(이름·색·아이콘) ──
+const UI_ICONS = {
+  topics: '<path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="1.6" fill="currentColor" stroke="none"/>',
+  groups: '<circle cx="12" cy="12" r="2"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 16.2a6 6 0 0 0 0-8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 19.1a10 10 0 0 0 0-14.2"/>',
+  system: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/>',
+  cameras: '<path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.4"/>',
+  lidar: '<circle cx="12" cy="12" r="2.4"/><circle cx="12" cy="12" r="6"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>',
+  radar: '<path d="M4 18a11 11 0 0 1 16 0"/><path d="M7.5 15a6.5 6.5 0 0 1 9 0"/><circle cx="12" cy="18" r="1.6" fill="currentColor" stroke="none"/>',
+  localization: '<path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
+  vehicle_can: '<path d="M5 15l1.6-5.2A2 2 0 0 1 8.5 8.4h7a2 2 0 0 1 1.9 1.4L19 15v3h-2.5v-1.6h-9V18H5z"/><circle cx="8" cy="14.4" r=".9" fill="currentColor"/><circle cx="16" cy="14.4" r=".9" fill="currentColor"/>',
+  perception: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  other: '<circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/>',
+};
+function uiIcon(name, size = 16) {
+  return `<svg class="ui-ico" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${UI_ICONS[name] || UI_ICONS.other}</svg>`;
+}
+const GROUP_META = {
+  cameras:      { label: '카메라',   color: '#57c7ff' },
+  lidar:        { label: '라이다',   color: '#a78bfa' },
+  radar:        { label: '레이더',   color: '#ffc65b' },
+  localization: { label: '측위',     color: '#4fdd97' },
+  vehicle_can:  { label: '차량 CAN', color: '#ff9f5a' },
+  perception:   { label: '인지',     color: '#ff7aa8' },
+};
+const GROUP_ORDER = Object.keys(GROUP_META);
+function groupMeta(g) { return GROUP_META[g] || { label: g.replace(/_/g, ' '), color: '#8996a6', other: true }; }
+function topicStatusOf(topic) {
+  const subFail = topic.error && (topic.error.includes('Failed to create') || topic.error.includes('invalid allocator'));
+  return (topic.error && !subFail) ? 'error' : topic.active ? 'active' : 'idle';
+}
+
 function groupForTopic(topic) {
   const ns = ((state.playNamespace || '/bagplay') + '/').toLowerCase();
   let name = topic.name.toLowerCase();
   // Play 네임스페이스 접두어는 분류 시엔 제거 (실시간과 동일하게 분류되도록)
   if (name.startsWith(ns)) name = name.slice(ns.length - 1);
   if (name.includes('camera') || name.includes('image')) return 'cameras';
-  if (name.includes('ouster') || name.includes('lidar') || name.includes('point') || name.includes('scan')) return 'lidar';
+  if (name.includes('ouster') || name.includes('velodyne') || name.includes('lidar') || name.includes('point') || name.includes('scan')) return 'lidar';
   if (name.includes('radar')) return 'radar';
   if (name.includes('gps') || name.includes('geodetic') || name.includes('cov') || name.includes('euler')) return 'localization';
   if (name.includes('can') || name.startsWith('/acu')) return 'vehicle_can';
@@ -271,6 +324,7 @@ function render(payload) {
   topicCount.textContent = modeTopics.length;
   activeCount.textContent = modeTopics.filter((t) => t.active).length;
   cameraCount.textContent = currentModeCameras().length;
+  updateLeftTabBadges();
   clock.textContent = payload.time || '';
   state.time = payload.time || '';
 
@@ -667,8 +721,595 @@ function switchSettingsTab(tab) {
   document.getElementById('setPanelBag').hidden = tab !== 'bag';
   document.getElementById('setPanelRviz').hidden = tab !== 'rviz';
   document.getElementById('setPanelBackup').hidden = tab !== 'backup';
+  document.getElementById('setPanelRoad').hidden = tab !== 'road';
+  document.getElementById('setPanelLens').hidden = tab !== 'lens';
+  document.getElementById('bagModal').classList.toggle('road-wide', tab === 'road' || tab === 'lens');
+  roadIpmActivate(tab === 'road');
+  lensActivate(tab === 'lens');
   document.getElementById('bagSelCount').style.visibility = tab === 'bag' ? '' : 'hidden';
 }
+
+// ── 보정값 적용 체크박스 (설정 → 카메라 보정). 파일에 저장되어 인지 노드도 1초 안에 따라옴 ──
+let calApply = { camera: true, perception: true, road: true };
+let calApplyCams = {};
+function calRectParam(name) {
+  return calApply.camera && name.endsWith('/image_raw/compressed') ? '&rect=1' : '';
+}
+const CAL_NAMES = { Front_120_Camera: '전방 120', Front_60_Camera: '전방 60', Front_30_Camera: '전방 30', Rear_Camera: '후방',
+  Left_Front_Camera: '좌전방', Right_Front_Camera: '우전방', Left_Rear_Camera: '좌후방', Right_Rear_Camera: '우후방' };
+function calApplyRender(res) {
+  const msg = document.getElementById('lensApplyMsg');
+  msg.classList.toggle('err', !res.ok);
+  if (!res.ok) { msg.textContent = res.error || '보정값 적용 설정을 읽지 못했습니다'; return; }
+  const changed = calApply.camera !== res.settings.camera;
+  calApply = res.settings;
+  calApplyCams = res.cameras || {};
+  document.querySelectorAll('[data-calapply]').forEach((el) => { el.checked = !!calApply[el.dataset.calapply]; });
+  const missing = Object.keys(calApplyCams).filter((c) => !calApplyCams[c]).map((c) => CAL_NAMES[c] || c);
+  msg.textContent = missing.length ? `보정값이 없어 원본으로 표시: ${missing.join(', ')}` : '';
+  if (changed) { view.cameraOptionSig = ''; renderCameras(); }
+}
+async function calApplyLoad() {
+  try {
+    const r = await fetch('/api/calibration_apply');
+    calApplyRender(r.ok ? await r.json() : { ok: false, error: '모니터를 다시 시작해야 이 기능을 쓸 수 있습니다' });
+  } catch (e) {
+    calApplyRender({ ok: false, error: '모니터 서버에 연결하지 못했습니다' });
+  }
+}
+document.querySelectorAll('[data-calapply]').forEach((el) => {
+  el.addEventListener('change', async () => {
+    try {
+      const r = await fetch('/api/calibration_apply', { method: 'POST', body: JSON.stringify({ [el.dataset.calapply]: el.checked }) });
+      calApplyRender(r.ok ? await r.json() : { ok: false, error: '모니터를 다시 시작해야 이 기능을 쓸 수 있습니다' });
+    } catch (e) {
+      calApplyRender({ ok: false, error: '모니터 서버에 연결하지 못했습니다' });
+    }
+  });
+});
+calApplyLoad();
+
+// ── 카메라 보정: 탭을 여는 동안만 보정 도구를 켜고 그 페이지를 불러옴 ──
+let lensToken = 0;
+let lensOn = false;
+function lensShowStatus(text, isError) {
+  const el = document.getElementById('lensStatus');
+  el.textContent = text;
+  el.classList.toggle('err', !!isError);
+}
+async function lensActivate(on) {
+  if (on === lensOn) return;
+  lensOn = on;
+  const token = ++lensToken;
+  const frame = document.getElementById('lensFrame');
+  const open = document.getElementById('lensOpen');
+  if (!on) {
+    frame.hidden = true;
+    frame.src = 'about:blank';
+    open.hidden = true;
+    fetch('/api/lens_calibrator/stop', { method: 'POST' }).catch(() => {});
+    return;
+  }
+  calApplyLoad();
+  lensShowStatus('보정 도구를 켜는 중…');
+  try {
+    const started = await fetch('/api/lens_calibrator/start', { method: 'POST' });
+    if (!started.ok) throw new Error('모니터를 다시 시작해야 이 기능을 쓸 수 있습니다');
+    let state = await started.json();
+    for (let i = 0; i < 40 && state.ok && !state.running && token === lensToken; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      state = await (await fetch('/api/lens_calibrator')).json();
+    }
+    if (token !== lensToken) return;
+    if (!state.ok) throw new Error(state.error || '보정 도구를 켜지 못했습니다');
+    if (!state.running) throw new Error('보정 도구가 응답하지 않습니다');
+    const url = `${location.protocol}//${location.hostname}:${state.port}/`;
+    frame.src = `${url}?theme=dark`;
+    frame.hidden = false;
+    open.href = url;
+    open.hidden = false;
+    const local = ['localhost', '127.0.0.1'].includes(location.hostname);
+    const phone = local ? `휴대폰은 같은 네트워크에서 보드 IP의 ${state.port} 포트로 접속합니다.` : `휴대폰은 ${url} 로 접속합니다.`;
+    lensShowStatus(`${phone} 샘플은 자동 저장되고, 계산 결과는 페이지 안의 [저장]을 눌러야 남습니다.`);
+  } catch (e) {
+    if (token === lensToken) lensShowStatus(e.message || '모니터 서버에 연결하지 못했습니다', true);
+  }
+}
+window.addEventListener('pagehide', () => {
+  if (lensOn) navigator.sendBeacon('/api/lens_calibrator/stop');
+});
+
+// ── 도로 인지: 차선 인식 범위 편집 ──
+// 범위 사각형 = 영상 위 4점(0~1, 가까운 왼쪽·가까운 오른쪽·먼 오른쪽·먼 왼쪽) + 실제 크기(거리·폭)
+const ROAD_MARGIN = 0.15;   // 영상 밖으로 조금 나가는 꼭짓점도 잡을 수 있게 둘레 여백
+const ROAD_LANE_WIDTH = 3.5;  // 국내 일반 차로 폭 (안내선 간격)
+const ROAD_VP = 4;             // 소실점 핸들 번호 (0~3 = 꼭짓점)
+const roadIpm = { active: false, cams: {}, saved: {}, cam: null, drag: -1, raf: 0, z: 1, cx: 0.5, cy: 0.5, needFit: true, pan: null, frozen: null, bevT: 0 };
+
+// 단위 정사각형 (u: 왼→오, v: 가까운→먼) → 사각형 (가까운 왼쪽, 가까운 오른쪽, 먼 오른쪽, 먼 왼쪽) 투영 변환
+function roadQuadMap(p) {
+  const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = p;
+  const dx1 = x1 - x2, dx2 = x3 - x2, sx = x0 - x1 + x2 - x3;
+  const dy1 = y1 - y2, dy2 = y3 - y2, sy = y0 - y1 + y2 - y3;
+  const den = dx1 * dy2 - dx2 * dy1;
+  const g = (sx * dy2 - dx2 * sy) / den, h = (dx1 * sy - sx * dy1) / den;
+  const a = x1 - x0 + g * x1, b = x3 - x0 + h * x3, d = y1 - y0 + g * y1, e = y3 - y0 + h * y3;
+  return (u, v) => {
+    const w = g * u + h * v + 1;
+    return [(a * u + b * v + x0) / w, (d * u + e * v + y0) / w];
+  };
+}
+// 두 직선 (a-b), (c-d) 의 교점. 거의 평행이면 null
+function roadCross(a, b, c, d) {
+  const r = [b[0] - a[0], b[1] - a[1]], q = [d[0] - c[0], d[1] - c[1]];
+  const den = r[0] * q[1] - r[1] * q[0];
+  if (Math.abs(den) < 1e-7) return null;
+  const t = ((c[0] - a[0]) * q[1] - (c[1] - a[1]) * q[0]) / den;
+  return [a[0] + r[0] * t, a[1] + r[1] * t];
+}
+function roadVanish(p) { return roadCross(p[0], p[3], p[1], p[2]); }
+// 소실점 vp 와 먼 변 위 한 점 q 로 먼 쪽 꼭짓점 다시 계산 (먼 변은 가까운 변과 나란하게)
+function roadFarFrom(p, vp, q) {
+  const q2 = [q[0] + p[1][0] - p[0][0], q[1] + p[1][1] - p[0][1]];
+  const r = roadCross(p[1], vp, q, q2), l = roadCross(p[0], vp, q, q2);
+  return r && l ? [p[0], p[1], r, l] : null;
+}
+function roadFrameSrc() {
+  return roadIpm.frozen || roadEl('roadRaw');
+}
+
+function roadEl(id) { return document.getElementById(id); }
+function roadStream(img, topic, tag, extra = '') {
+  stopCameraStream(img);
+  const ports = state.streamPorts || [];
+  const base = ports.length ? `${location.protocol}//${location.hostname}:${ports[ports.length - 1]}` : '';
+  const url = `${base}/stream?topic=${topic}&id=${tag}${extra}`;
+  img.dataset.topic = topic;
+  img.dataset.baseurl = url;
+  startCameraStream(img, url);
+}
+function roadStatus(text, kind) {
+  const el = roadEl('roadStatus');
+  el.textContent = text || '';
+  el.className = 'road-status' + (kind ? ' ' + kind : '');
+}
+function roadApplyState(cameras) {
+  roadIpm.saved = cameras;
+  roadIpm.cams = JSON.parse(JSON.stringify(cameras));
+}
+async function roadIpmActivate(on) {
+  if (on === roadIpm.active) return;
+  roadIpm.active = on;
+  // 편집 중에는 창에 가려진 인지 탭 스트림을 멈춤 — 포트당 연결 한도(6)가 차면 결과 영상이 연결되지 못함
+  view.cameraOptionSig = '';
+  renderCameras();
+  if (!on) {
+    stopCameraStream(roadEl('roadRaw'));
+    stopCameraStream(roadEl('roadResult'));
+    if (roadIpm.raf) cancelAnimationFrame(roadIpm.raf);
+    roadIpm.raf = 0;
+    roadUnfreeze();
+    return;
+  }
+  roadStatus('불러오는 중…');
+  let res = null;
+  try {
+    const r = await fetch('/api/road_perception/ipm');
+    res = r.ok ? await r.json() : { ok: false, error: '모니터를 다시 시작해야 이 기능을 쓸 수 있습니다 (bringup 재시작)' };
+  } catch (e) {
+    res = { ok: false, error: '모니터 서버에 연결하지 못했습니다' };
+  }
+  if (!roadIpm.active) return;
+  if (!res.ok) { roadStatus(res.error, 'err'); return; }
+  roadApplyState(res.cameras);
+  const names = Object.keys(res.cameras);
+  roadEl('roadCam').innerHTML = names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  roadSelectCam(names.includes(roadIpm.cam) ? roadIpm.cam : names[0]);
+  roadStatus('');
+  if (!roadIpm.raf) roadDraw();
+}
+function roadSelectCam(name) {
+  roadIpm.cam = name;
+  if (!name) return;
+  roadEl('roadCam').value = name;
+  roadFillFields();
+  roadIpm.needFit = true;
+  roadUnfreeze();
+  // 확대해도 선명하도록 원본 해상도. 렌즈 보정이 켜져 있으면 편 영상 위에서 범위를 맞춘다
+  roadStream(roadEl('roadRaw'), `/${name}/image_raw/compressed`, 'roadraw', `&full=1${roadIpm.cams[name] && roadIpm.cams[name].rect ? '&rect=1' : ''}`);
+  roadStream(roadEl('roadResult'), `/road_perception/${name}/result_image/compressed`, 'roadres');
+}
+function roadFillFields() {
+  const c = roadIpm.cams[roadIpm.cam];
+  if (!c) return;
+  roadEl('roadNear').value = c.near;
+  roadEl('roadFar').value = c.far;
+  roadEl('roadWidth').value = c.width;
+  roadEl('roadCalibrated').checked = !!c.calibrated;
+  roadBadge();
+}
+function roadDirty() {
+  const a = roadIpm.cams[roadIpm.cam], b = roadIpm.saved[roadIpm.cam];
+  return !!a && JSON.stringify(a) !== JSON.stringify(b);
+}
+function roadBadge() {
+  const c = roadIpm.cams[roadIpm.cam];
+  const el = roadEl('roadBadge');
+  if (!c) { el.textContent = ''; return; }
+  const parts = [c.custom ? '직접 설정한 범위' : '기본 범위(근사)'];
+  if (roadDirty()) parts.push('저장 안 됨');
+  el.textContent = parts.join(' · ');
+  el.classList.toggle('dirty', roadDirty());
+}
+function roadConvex(p) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = p[i], b = p[(i + 1) % 4], c = p[(i + 2) % 4];
+    const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    if (Math.abs(cr) < 1e-4) return false;
+    if (sign && Math.sign(cr) !== sign) return false;
+    sign = Math.sign(cr);
+  }
+  return true;
+}
+// 정규 좌표(0~1) ↔ 캔버스 CSS 픽셀. z=1 이면 영상이 캔버스에 꽉 참, (cx, cy) = 화면 가운데의 정규 좌표
+function roadImgSize() {
+  if (roadIpm.frozen) return [roadIpm.frozen.width, roadIpm.frozen.height];
+  const img = roadEl('roadRaw');
+  return img.naturalWidth > 0 ? [img.naturalWidth, img.naturalHeight] : [1920, 1536];
+}
+function roadUnfreeze() {
+  roadIpm.frozen = null;
+  const b = roadEl('roadFreeze');
+  b.textContent = '화면 정지';
+  b.setAttribute('aria-pressed', 'false');
+}
+// 위에서 본 미리보기: 바닥 줄(가로줄)마다 영상의 해당 선분을 잘라 그림 (아핀 띠)
+function roadDrawBev() {
+  const cv = roadEl('roadBev');
+  const c = roadIpm.cams[roadIpm.cam];
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!c || !W || !H) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#080c11';
+  g.fillRect(0, 0, W, H);
+  const span = Math.max(0.5, c.far - c.near);
+  // 실제 비율 유지: 폭 c.width, 길이 span
+  const k = Math.min(W / c.width, H / span);
+  const bw = c.width * k, bh = span * k, bx = (W - bw) / 2, by = (H - bh) / 2;
+  const src = roadFrameSrc();
+  const [aw, ah] = roadImgSize();
+  const ready = roadIpm.frozen || src.naturalWidth > 0;
+  const map = roadQuadMap(c.corners);
+  if (ready) {
+    const rows = Math.min(160, Math.max(30, Math.ceil(bh / 2)));
+    for (let i = 0; i < rows; i++) {
+      const v1 = 1 - i / rows, v2 = 1 - (i + 1) / rows;           // 위쪽 줄 = 먼 곳
+      const y1 = by + bh * i / rows, y2 = by + bh * (i + 1) / rows;
+      const [ax, ay] = map(0, v1), [bx1, by1] = map(1, v1), [cx, cy] = map(0, v2);
+      const sx0 = ax * aw, sy0 = ay * ah, ux = bx1 * aw - sx0, uy = by1 * ah - sy0, vx = cx * aw - sx0, vy = cy * ah - sy0;
+      const det = ux * vy - uy * vx;
+      if (Math.abs(det) < 1e-6) continue;
+      // 영상 픽셀 → 미리보기: S0→(bx,y1), S0+U→(bx+bw,y1), S0+V→(bx,y2)
+      const a = (bw * vy) / det, c2 = (-bw * vx) / det;
+      const b = (-(y2 - y1) * uy) / det, d = ((y2 - y1) * ux) / det;
+      g.save();
+      g.beginPath();
+      g.rect(bx, y1, bw, y2 - y1 + 0.7);        // 줄 사이 틈 방지
+      g.clip();
+      g.setTransform(dpr * a, dpr * b, dpr * c2, dpr * d, dpr * (bx - a * sx0 - c2 * sy0), dpr * (y1 - b * sx0 - d * sy0));
+      g.drawImage(src, 0, 0, aw, ah);
+      g.restore();
+    }
+  }
+  // 눈금: 세로선 3.5 m(차로 폭), 가로선 5 m
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.lineWidth = 1;
+  g.strokeStyle = 'rgba(87,199,255,.75)';
+  g.setLineDash([5, 4]);
+  g.beginPath();
+  const n = Math.floor(c.width / ROAD_LANE_WIDTH);
+  for (let i = 0; i <= n; i++) {
+    const x = bx + bw / 2 + (i - n / 2) * ROAD_LANE_WIDTH * k;
+    g.moveTo(x, by); g.lineTo(x, by + bh);
+  }
+  g.stroke();
+  g.strokeStyle = 'rgba(255,255,255,.4)';
+  g.beginPath();
+  for (let d = Math.ceil(c.near / 5) * 5; d <= c.far; d += 5) {
+    const y = by + bh - (d - c.near) * k;
+    g.moveTo(bx, y); g.lineTo(bx + bw, y);
+  }
+  g.stroke();
+  g.setLineDash([]);
+  g.font = '600 10px sans-serif';
+  g.fillStyle = '#d7e4ef';
+  for (let d = Math.ceil(c.near / 5) * 5; d <= c.far; d += 5) g.fillText(`${d} m`, bx + 3, by + bh - (d - c.near) * k - 3);
+}
+function roadView() {
+  const cv = roadEl('roadCanvas');
+  const W = cv.clientWidth, H = cv.clientHeight;
+  const [aw, ah] = roadImgSize();
+  const s = Math.min(W / aw, H / ah) * roadIpm.z;
+  const iw = aw * s, ih = ah * s;
+  return { W, H, iw, ih, ox: W / 2 - roadIpm.cx * iw, oy: H / 2 - roadIpm.cy * ih };
+}
+// 영상과 사각형이 모두 보이게 맞춤
+function roadFit() {
+  const c = roadIpm.cams[roadIpm.cam];
+  const cv = roadEl('roadCanvas');
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  const xs = [0, 1, ...(c ? c.corners.map((p) => p[0]) : [])], ys = [0, 1, ...(c ? c.corners.map((p) => p[1]) : [])];
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const [aw, ah] = roadImgSize();
+  const base = Math.min(W / aw, H / ah);
+  roadIpm.z = Math.min(W / ((x1 - x0) * aw), H / ((y1 - y0) * ah)) / base * 0.96;
+  roadIpm.cx = (x0 + x1) / 2;
+  roadIpm.cy = (y0 + y1) / 2;
+  roadIpm.needFit = false;
+  roadEl('roadZoomLabel').textContent = `${Math.round(roadIpm.z * 100)}%`;
+}
+// 화면 위 (mx, my) 지점을 고정한 채 확대/축소
+function roadZoomAt(f, mx, my) {
+  const v = roadView();
+  const u = (mx - v.ox) / v.iw, w = (my - v.oy) / v.ih;
+  roadIpm.z = Math.max(0.5, Math.min(10, roadIpm.z * f));
+  const m = roadView();
+  roadIpm.cx -= (mx - (m.ox + u * m.iw)) / m.iw;
+  roadIpm.cy -= (my - (m.oy + w * m.ih)) / m.ih;
+  roadEl('roadZoomLabel').textContent = `${Math.round(roadIpm.z * 100)}%`;
+}
+function roadDraw() {
+  roadIpm.raf = 0;
+  if (!roadIpm.active) return;
+  const cv = roadEl('roadCanvas');
+  if (roadIpm.needFit) roadFit();
+  const v = roadView();
+  const dpr = window.devicePixelRatio || 1;
+  if (v.W > 0 && (cv.width !== Math.round(v.W * dpr) || cv.height !== Math.round(v.H * dpr))) {
+    cv.width = Math.round(v.W * dpr);
+    cv.height = Math.round(v.H * dpr);
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#080c11';
+  g.fillRect(0, 0, v.W, v.H);
+  const img = roadEl('roadRaw');
+  if (roadIpm.frozen) g.drawImage(roadIpm.frozen, v.ox, v.oy, v.iw, v.ih);
+  else if (img.naturalWidth > 0) g.drawImage(img, v.ox, v.oy, v.iw, v.ih);
+  else {
+    g.fillStyle = '#7f8c9a';
+    g.font = '12px sans-serif';
+    g.textAlign = 'center';
+    g.fillText('카메라 영상 기다리는 중', v.W / 2, v.H / 2);
+    g.textAlign = 'left';
+  }
+  const c = roadIpm.cams[roadIpm.cam];
+  if (c) {
+    const pts = c.corners.map(([u, w]) => [v.ox + u * v.iw, v.oy + w * v.ih]);
+    g.beginPath();
+    pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+    g.closePath();
+    g.fillStyle = 'rgba(87,199,255,.16)';
+    g.fill();
+    g.strokeStyle = '#57c7ff';
+    g.lineWidth = 2;
+    g.stroke();
+    // 가까운 변 강조 + 거리 표시
+    g.beginPath(); g.moveTo(...pts[0]); g.lineTo(...pts[1]);
+    g.strokeStyle = '#ffc65b'; g.lineWidth = 3; g.stroke();
+    // 차로 폭 안내선: 입력한 폭 기준 3.5 m 간격 (실제 차선과 겹치면 폭이 맞음)
+    if (c.width > ROAD_LANE_WIDTH) {
+      const qm = roadQuadMap(pts);
+      g.save();
+      g.setLineDash([7, 6]); g.lineWidth = 1.5; g.strokeStyle = 'rgba(255,255,255,.85)';
+      for (let d = ROAD_LANE_WIDTH; d < c.width - 0.2; d += ROAD_LANE_WIDTH) {
+        const t = d / c.width;
+        g.beginPath();
+        g.moveTo(...qm(t, 0));
+        g.lineTo(...qm(t, 1));
+        g.stroke();
+      }
+      g.restore();
+    }
+    // 소실점 + 연장선: 실제 차선에 겹치면 맞음 (사각형 안쪽뿐 아니라 화면 끝까지 보임)
+    const vp = roadVanish(c.corners);
+    if (vp) {
+      const vs = [v.ox + vp[0] * v.iw, v.oy + vp[1] * v.ih];
+      g.save();
+      g.setLineDash([10, 6]); g.lineWidth = 1.5; g.strokeStyle = 'rgba(87,199,255,.9)';
+      for (const q of [pts[0], pts[1]]) {
+        const dx = q[0] - vs[0], dy = q[1] - vs[1], L = Math.hypot(dx, dy) || 1;
+        const reach = v.W + v.H;
+        g.beginPath(); g.moveTo(...vs); g.lineTo(vs[0] + dx / L * reach, vs[1] + dy / L * reach); g.stroke();
+      }
+      g.restore();
+      g.beginPath(); g.arc(vs[0], vs[1], roadIpm.drag === ROAD_VP ? 9 : 7, 0, Math.PI * 2);
+      g.fillStyle = roadIpm.drag === ROAD_VP ? '#ffffff' : '#ff7aa8';
+      g.fill();
+      g.lineWidth = 2; g.strokeStyle = '#06101a'; g.stroke();
+      g.font = '600 11px sans-serif';
+      g.fillStyle = '#ffb3cc';
+      g.fillText('소실점', vs[0] + 11, vs[1] - 9);
+    }
+    g.font = '600 11px sans-serif';
+    const tag = (text, x, y, col) => {
+      const w = g.measureText(text).width + 10;
+      const tx = Math.max(2, Math.min(v.W - w - 2, x - w / 2)), ty = Math.max(2, Math.min(v.H - 18, y - 9));
+      g.fillStyle = 'rgba(8,12,17,.82)'; g.fillRect(tx, ty, w, 18);
+      g.fillStyle = col; g.fillText(text, tx + 5, ty + 13);
+    };
+    // 글자가 꼭짓점을 가리지 않도록 변 바깥쪽에 표시
+    tag(`가까운 변 ${c.near} m · 폭 ${c.width} m`, (pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2 + 22, '#ffc65b');
+    tag(`먼 변 ${c.far} m`, (pts[2][0] + pts[3][0]) / 2, (pts[2][1] + pts[3][1]) / 2 - 22, '#9fdcff');
+    pts.forEach(([x, y], i) => {
+      g.beginPath(); g.arc(x, y, roadIpm.drag === i ? 8 : 6, 0, Math.PI * 2);
+      g.fillStyle = roadIpm.drag === i ? '#ffffff' : i < 2 ? '#ffc65b' : '#57c7ff';
+      g.fill();
+      g.lineWidth = 2; g.strokeStyle = '#06101a'; g.stroke();
+    });
+  }
+  const nowT = performance.now();
+  if (roadIpm.drag >= 0 || roadIpm.frozen ? nowT - roadIpm.bevT > 60 : nowT - roadIpm.bevT > 150) {
+    roadIpm.bevT = nowT;
+    roadDrawBev();
+  }
+  roadIpm.raf = requestAnimationFrame(roadDraw);
+}
+function roadPointer(e) {
+  const r = roadEl('roadCanvas').getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+roadEl('roadCanvas').addEventListener('pointerdown', (e) => {
+  const c = roadIpm.cams[roadIpm.cam];
+  if (!c) return;
+  const v = roadView();
+  const [mx, my] = roadPointer(e);
+  let best = -1, bd = 22;
+  const vp = roadVanish(c.corners);
+  [...c.corners, ...(vp ? [vp] : [])].forEach(([u, w], i) => {
+    const d = Math.hypot(v.ox + u * v.iw - mx, v.oy + w * v.ih - my);
+    if (d < bd) { bd = d; best = i; }
+  });
+  e.currentTarget.setPointerCapture(e.pointerId);
+  e.preventDefault();
+  if (best < 0) {            // 빈 곳: 화면 이동
+    roadIpm.pan = { x: mx, y: my, cx: roadIpm.cx, cy: roadIpm.cy };
+    e.currentTarget.style.cursor = 'grabbing';
+    return;
+  }
+  roadIpm.drag = best;
+});
+roadEl('roadCanvas').addEventListener('pointermove', (e) => {
+  const c = roadIpm.cams[roadIpm.cam];
+  const v = roadView();
+  const [mx, my] = roadPointer(e);
+  if (roadIpm.pan) {
+    roadIpm.cx = roadIpm.pan.cx - (mx - roadIpm.pan.x) / v.iw;
+    roadIpm.cy = roadIpm.pan.cy - (my - roadIpm.pan.y) / v.ih;
+    return;
+  }
+  if (roadIpm.drag < 0) {
+    const vpH = c && roadVanish(c.corners);
+    const near = c && [...c.corners, ...(vpH ? [vpH] : [])].some(([u, w]) => Math.hypot(v.ox + u * v.iw - mx, v.oy + w * v.ih - my) < 22);
+    e.currentTarget.style.cursor = near ? 'grab' : 'move';
+    return;
+  }
+  const clampN = (q) => +Math.max(-ROAD_MARGIN, Math.min(1 + ROAD_MARGIN, q)).toFixed(4);
+  const q = [(mx - v.ox) / v.iw, (my - v.oy) / v.ih];
+  const cur = c.corners.map((p) => p.slice());
+  const lock = roadEl('roadVpLock').checked;
+  const curVp = roadVanish(cur);
+  let next = null;
+  if (roadIpm.drag === ROAD_VP) {
+    // 소실점 이동: 가까운 변은 그대로, 먼 쪽 꼭짓점이 따라옴 (먼 변 높이 유지)
+    next = roadFarFrom(cur, q, [(cur[2][0] + cur[3][0]) / 2, (cur[2][1] + cur[3][1]) / 2]);
+  } else if (lock && curVp && roadIpm.drag < 2) {
+    // 가까운 꼭짓점 이동: 소실점 유지, 같은 쪽 먼 꼭짓점이 연장선을 따라 움직임
+    const moved = cur.map((p) => p.slice());
+    moved[roadIpm.drag] = [clampN(q[0]), clampN(q[1])];
+    next = roadFarFrom(moved, curVp, [(cur[2][0] + cur[3][0]) / 2, (cur[2][1] + cur[3][1]) / 2]);
+  } else if (lock && curVp) {
+    // 먼 꼭짓점 이동: 소실점 유지, 먼 변 전체가 앞뒤로 움직임
+    next = roadFarFrom(cur, curVp, q);
+  } else {
+    next = cur;
+    next[roadIpm.drag] = [clampN(q[0]), clampN(q[1])];
+  }
+  if (!next) return;
+  next = next.map((p) => p.map((n) => +n.toFixed(4)));
+  // 꼬이거나 저장 가능한 범위를 벗어나는 위치로는 움직이지 않음
+  if (!roadConvex(next) || next.flat().some((n) => n < -ROAD_MARGIN || n > 1 + ROAD_MARGIN)) return;
+  c.corners = next;
+  roadBadge();
+  roadStatus('');
+});
+const roadDragEnd = () => { roadIpm.drag = -1; roadIpm.pan = null; };
+roadEl('roadCanvas').addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const [mx, my] = roadPointer(e);
+  roadZoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, mx, my);
+}, { passive: false });
+roadEl('roadCanvas').addEventListener('dblclick', roadFit);
+const roadZoomCenter = (f) => { const v = roadView(); roadZoomAt(f, v.W / 2, v.H / 2); };
+roadEl('roadZoomIn').addEventListener('click', () => roadZoomCenter(1.3));
+roadEl('roadZoomOut').addEventListener('click', () => roadZoomCenter(1 / 1.3));
+roadEl('roadZoomFit').addEventListener('click', roadFit);
+roadEl('roadFreeze').addEventListener('click', (e) => {
+  const raw = roadEl('roadRaw');
+  if (roadIpm.frozen) {
+    roadUnfreeze();
+    return;
+  }
+  if (!(raw.naturalWidth > 0)) { roadStatus('아직 카메라 영상이 없습니다.', 'err'); return; }
+  const f = document.createElement('canvas');
+  f.width = raw.naturalWidth;
+  f.height = raw.naturalHeight;
+  f.getContext('2d').drawImage(raw, 0, 0);
+  roadIpm.frozen = f;
+  e.currentTarget.textContent = '정지 해제';
+  e.currentTarget.setAttribute('aria-pressed', 'true');
+});
+document.querySelectorAll('.road-lanes [data-lanes]').forEach((b) => b.addEventListener('click', () => {
+  const c = roadIpm.cams[roadIpm.cam];
+  if (!c) return;
+  c.width = Number(b.dataset.lanes) * ROAD_LANE_WIDTH;
+  roadFillFields();
+  roadStatus('');
+}));
+roadEl('roadCanvas').addEventListener('pointerup', roadDragEnd);
+roadEl('roadCanvas').addEventListener('pointercancel', roadDragEnd);
+roadEl('roadCam').addEventListener('change', (e) => { roadSelectCam(e.target.value); roadStatus(''); });
+[['roadNear', 'near'], ['roadFar', 'far'], ['roadWidth', 'width']].forEach(([id, key]) => {
+  roadEl(id).addEventListener('input', (e) => {
+    const c = roadIpm.cams[roadIpm.cam];
+    const val = parseFloat(e.target.value);
+    if (c && Number.isFinite(val)) { c[key] = val; roadBadge(); roadStatus(''); }
+  });
+});
+roadEl('roadCalibrated').addEventListener('change', (e) => {
+  const c = roadIpm.cams[roadIpm.cam];
+  if (c) { c.calibrated = e.target.checked; roadBadge(); }
+});
+async function roadPost(path, body, okText) {
+  roadStatus('저장 중…');
+  let res;
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    res = r.ok ? await r.json() : { ok: false, error: `서버 오류 (${r.status}) — bringup 을 다시 시작했는지 확인하세요` };
+  } catch (e) {
+    res = { ok: false, error: '모니터 서버에 연결하지 못했습니다' };
+  }
+  if (!res.ok) { roadStatus(res.error, 'err'); return; }
+  const others = roadIpm.cams;           // 다른 카메라의 저장 안 한 편집은 유지
+  const cur = roadIpm.cam;
+  const edits = Object.keys(others).filter((n) => n !== cur && JSON.stringify(others[n]) !== JSON.stringify(roadIpm.saved[n]));
+  const kept = Object.fromEntries(edits.map((n) => [n, others[n]]));
+  roadApplyState(res.cameras);
+  Object.assign(roadIpm.cams, kept);
+  roadFillFields();
+  roadStatus(okText, 'ok');
+}
+roadEl('roadSave').addEventListener('click', () => {
+  const c = roadIpm.cams[roadIpm.cam];
+  if (!c) return;
+  roadPost('/api/road_perception/ipm', { camera: roadIpm.cam, corners: c.corners, near: c.near, far: c.far, width: c.width, offset: c.offset, calibrated: c.calibrated, rect: !!c.rect },
+    `${roadIpm.cam} 범위를 저장했습니다. 1~2초 뒤 결과에 반영됩니다.`);
+});
+roadEl('roadRevert').addEventListener('click', () => {
+  if (!roadIpm.saved[roadIpm.cam]) return;
+  roadIpm.cams[roadIpm.cam] = JSON.parse(JSON.stringify(roadIpm.saved[roadIpm.cam]));
+  roadFillFields();
+  roadStatus('');
+});
+roadEl('roadReset').addEventListener('click', () => {
+  if (!roadIpm.cam || !window.confirm(`${roadIpm.cam} 의 직접 설정한 범위를 지우고 기본값으로 되돌릴까요?`)) return;
+  roadPost('/api/road_perception/ipm/reset', { camera: roadIpm.cam }, `${roadIpm.cam} 을 기본 범위로 되돌렸습니다.`);
+});
 
 // ── 화면 구성: 헤더 항목 편집 리스트 ──
 function renderHeaderItemList() {
@@ -852,7 +1493,26 @@ async function createDirBrowseFolder() {
   }
 }
 
+// 창 아래 공통 '저장': 편집했지만 저장 안 한 차선 범위도 함께 저장 (실패하면 이벤트 로그에 남김)
+async function roadSaveAllDirty() {
+  for (const name of Object.keys(roadIpm.cams)) {
+    const c = roadIpm.cams[name];
+    if (JSON.stringify(c) === JSON.stringify(roadIpm.saved[name])) continue;
+    try {
+      const r = await fetch('/api/road_perception/ipm', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camera: name, corners: c.corners, near: c.near, far: c.far, width: c.width, offset: c.offset, calibrated: c.calibrated, rect: !!c.rect }) });
+      const res = r.ok ? await r.json() : { ok: false, error: `서버 오류 ${r.status}` };
+      if (!res.ok) pushEvent('경고', `${name} 차선 범위 저장 실패: ${res.error}`, 'Road');
+    } catch (e) {
+      pushEvent('경고', `${name} 차선 범위 저장 실패: 서버 연결 안 됨`, 'Road');
+    }
+  }
+  renderEvents();
+}
 function closeSettingsModal(save) {
+  if (save) roadSaveAllDirty();
+  roadIpmActivate(false);
+  lensActivate(false);
   document.getElementById('bagOverlay').hidden = true;
   document.getElementById('bagModal').hidden = true;
   if (save) {
@@ -2080,23 +2740,75 @@ function renderProximityAlert() {
   el.textContent = `⚠ ${objPosLabel(best.x, best.y)} ${best.d.toFixed(1)}m 장애물${danger ? ' — 위험' : ''}`;
 }
 
+// 센서 탭: 위쪽 전체 건강도(링) + 주요 센서 그룹 카드(링·상태·중단 토픽) + 기타 그룹 칩
+function groupStatus(active, total) {
+  if (!total) return { cls: 'na', text: '—' };
+  const r = active / total;
+  return r >= 0.9 ? { cls: 'ok', text: '정상' } : r > 0 ? { cls: 'warn', text: '일부 중단' } : { cls: 'bad', text: '중단' };
+}
 function renderGroups() {
   // 백엔드 groups는 실시간+재생 토픽을 합산하므로, 현재 뷰 모드 토픽만으로 클라이언트에서 재집계
   const agg = {};
   for (const t of currentModeTopics()) {
     const g = groupForTopic(t);
-    const a = agg[g] || (agg[g] = { name: g, total: 0, active: 0, rate_hz: 0 });
+    const a = agg[g] || (agg[g] = { name: g, total: 0, active: 0, rate_hz: 0, down: [] });
     a.total += 1;
-    if (t.active) a.active += 1;
+    if (t.active) a.active += 1; else a.down.push(t.name);
     a.rate_hz += t.rate_hz;
   }
-  const groups = Object.keys(agg).sort().map((k) => agg[k]);
-  if (!groups.length) { groupGrid.innerHTML = '<div class="empty">아직 ROS 토픽을 찾지 못했습니다.</div>'; return; }
-  groupGrid.innerHTML = groups.map((group) => {
-    const percent = group.total ? Math.round((group.active / group.total) * 100) : 0;
-    return `<article class="group-card"><b>${escapeHtml(group.name.replace(/_/g, ' '))}</b><div class="numbers"><span>${group.active}/${group.total}</span><span>${group.rate_hz.toFixed(1)} Hz</span></div><div class="bar"><i style="width:${percent}%"></i></div></article>`;
+  const names = Object.keys(agg);
+  if (!names.length) { groupGrid.innerHTML = '<div class="empty">아직 ROS 토픽을 찾지 못했습니다.</div>'; return; }
+  const main = GROUP_ORDER.filter((g) => agg[g]).map((g) => agg[g]);
+  const others = names.filter((g) => !GROUP_META[g]).sort().map((g) => agg[g]);
+  const mt = main.reduce((s, g) => s + g.total, 0), ma = main.reduce((s, g) => s + g.active, 0);
+  const health = mt ? Math.round(ma / mt * 100) : 0;
+  const hst = groupStatus(ma, mt);
+  const totalHz = main.reduce((s, g) => s + g.rate_hz, 0);
+  const warnGroups = main.filter((g) => groupStatus(g.active, g.total).cls !== 'ok');
+  const shortName = (n) => n.split('/').filter(Boolean).slice(-2).join('/');
+
+  const hero = `<section class="sg-hero st-${hst.cls}">
+      <div class="sg-ring" style="--p:${health}"><div><b>${health}<small>%</small></b><span>센서 상태</span></div></div>
+      <div class="sg-hero-body">
+        <div class="sg-hero-title"><span class="sg-badge st-${hst.cls}">${hst.text}</span><span>주요 센서 ${main.length}개 그룹</span></div>
+        <div class="sg-hero-stats">
+          <div><b>${ma}</b><span>활성 토픽</span></div>
+          <div><b>${mt - ma}</b><span>중단·대기</span></div>
+          <div><b>${totalHz >= 1000 ? (totalHz / 1000).toFixed(1) + 'k' : totalHz.toFixed(0)}</b><span>Hz 합계</span></div>
+        </div>
+        <div class="sg-hero-warn">${warnGroups.length ? warnGroups.map((g) => `<span style="--gc:${groupMeta(g.name).color}">${groupMeta(g.name).label} ${g.active}/${g.total}</span>`).join('') : '<em>모든 주요 센서가 정상 수신 중</em>'}</div>
+      </div>
+    </section>`;
+
+  const cards = main.map((g) => {
+    const m = groupMeta(g.name);
+    const pct = g.total ? Math.round(g.active / g.total * 100) : 0;
+    const st = groupStatus(g.active, g.total);
+    const down = g.down.slice(0, 2).map((n) => `<li title="${escapeHtml(n)}">${escapeHtml(shortName(n))}</li>`).join('')
+      + (g.down.length > 2 ? `<li class="more">외 ${g.down.length - 2}개</li>` : '');
+    return `<article class="group-card sg-card st-${st.cls}" data-group="${g.name}" style="--gc:${m.color}" title="클릭: 토픽 탭에서 이 그룹만 보기">
+      <header><span class="sg-ico">${uiIcon(g.name, 16)}</span><b>${escapeHtml(m.label)}</b><span class="sg-badge st-${st.cls}">${st.text}</span></header>
+      <div class="sg-main">
+        <div class="sg-mini-ring" style="--p:${pct}"><span>${pct}%</span></div>
+        <div class="sg-nums"><div><b>${g.active}</b><small>/ ${g.total} 활성</small></div><div class="sg-hz">${g.rate_hz.toFixed(1)} <small>Hz</small></div></div>
+      </div>
+      ${g.down.length ? `<ul class="sg-down">${down}</ul>` : '<div class="sg-allok">전체 수신 중</div>'}
+    </article>`;
   }).join('');
+
+  const otherHtml = others.length ? `<section class="sg-others">
+      <div class="sg-sub">기타 토픽 그룹 <small>${others.length}</small></div>
+      <div class="sg-chips">${others.map((g) => `<button type="button" class="sg-chip${g.active ? ' on' : ''}" data-group="other" title="${escapeHtml(g.name)} · ${g.rate_hz.toFixed(1)} Hz"><i></i>${escapeHtml(g.name.replace(/_/g, ' '))}<b>${g.active}/${g.total}</b></button>`).join('')}</div>
+    </section>` : '';
+
+  groupGrid.innerHTML = hero + `<div class="sg-grid">${cards}</div>` + otherHtml;
 }
+groupGrid.addEventListener('click', (e) => {
+  const c = e.target.closest('[data-group]');
+  if (!c) return;
+  setTopicGroup(c.dataset.group);
+  switchLeftTab('topics');
+});
 
 
 function usageColor(pct) {
@@ -2130,7 +2842,7 @@ function drawSparkline(canvasId, data, strokeColor, fillColor) {
   ctx.lineWidth = 1.5;
   ctx.lineJoin = 'round';
   ctx.stroke();
-  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+  ctx.lineTo(pts[pts.length - 1][0], H); ctx.lineTo(pts[0][0], H); ctx.closePath();
   ctx.fillStyle = fillColor;
   ctx.fill();
 }
@@ -2266,16 +2978,19 @@ function renderSysAll(sys) {
       }).join('')
     : '<span class="sys-muted">n/a</span>';
 
-  return sysMetricCard('CPU', cpuPct,
-      `${cpu.temp_c != null ? `<span class="sysm-sub">${cpu.temp_c}°C</span>` : ''}${loadAvg.length ? `<span class="sysm-sub">load ${loadAvg.join(' / ')}</span>` : ''}`,
-      'sysChartCpu', usageColor(cpuPct))
-    + sysMetricCard('GPU', gpuPct,
-      `${gpu.temp_c != null ? `<span class="sysm-sub">${gpu.temp_c}°C</span>` : ''}${gpu.freq_mhz ? `<span class="sysm-sub">${gpu.freq_mhz} MHz</span>` : ''}${powerTot != null ? `<span class="sysm-sub">${(powerTot/1000).toFixed(1)} W</span>` : ''}`,
-      'sysChartGpu', usageColor(gpuPct))
-    + sysMetricCard('RAM', ramPct,
-      `<span class="sysm-sub">${ramUsedGB} / ${ramTotGB} GB</span>${memory.swap_total_mb > 0 ? `<span class="sysm-sub">SWAP ${memory.swap_used_mb}/${memory.swap_total_mb} MB</span>` : ''}`,
-      'sysChartRam', usageColor(ramPct))
-    + `<article class="sysm-card sysm-card-info">
+  const ring = (label, pct, lv, sub) => `<div class="sys-ring lv-${lv}" style="--p:${Math.min(100, pct).toFixed(1)}">
+      <div class="ring-dial"><b>${pct.toFixed(0)}<small>%</small></b><span>${label}</span></div>
+      <div class="ring-sub">${sub}</div></div>`;
+  const trend = (label, id, pct, lv) => `<div class="trend-row lv-${lv}"><span class="trend-k">${label}</span><canvas id="${id}" class="trend-canvas" width="320" height="30"></canvas><b>${pct.toFixed(0)}%</b></div>`;
+  return `<article class="sysm-card sys-hero">
+      ${ring('CPU', cpuPct, usageColor(cpuPct), `${cpu.temp_c != null ? cpu.temp_c + '°C' : ''}${loadAvg.length ? ` · load ${loadAvg[0]}` : ''}`)}
+      ${ring('GPU', gpuPct, usageColor(gpuPct), `${gpu.temp_c != null ? gpu.temp_c + '°C' : ''}${gpu.freq_mhz ? ` · ${gpu.freq_mhz} MHz` : ''}`)}
+      ${ring('RAM', ramPct, usageColor(ramPct), `${ramUsedGB} / ${ramTotGB} GB`)}
+    </article>
+    <article class="sysm-card sys-trend"><div class="sysm-label">최근 추이 <small>${loadAvg.length ? 'load ' + loadAvg.join(' / ') : ''}</small></div>
+      ${trend('CPU', 'sysChartCpu', cpuPct, usageColor(cpuPct))}${trend('GPU', 'sysChartGpu', gpuPct, usageColor(gpuPct))}${trend('RAM', 'sysChartRam', ramPct, usageColor(ramPct))}
+    </article>
+    <article class="sysm-card sysm-card-info">
         <div class="sysm-info-row">
           <div class="sysm-stat"><span class="sysm-k">모델</span><span class="sysm-v">${escapeHtml((sys.model||'').replace('NVIDIA ',''))}</span></div>
           <div class="sysm-stat"><span class="sysm-k">JetPack</span><span class="sysm-v">${escapeHtml(sys.jetpack||'—')}</span></div>
@@ -2428,7 +3143,23 @@ function formatUptime(seconds) {
 // 카메라 슬롯 드롭다운은 항상 '논리(실시간) 토픽' 카탈로그를 보여준다 — 실시간/Play
 // 두 모드에서 같은 슬롯 설정을 그대로 재사용하기 위함. 실제로 표시되는 스트림은
 // activeCameraFor()가 현재 뷰 모드에 맞춰(effectiveTopic) 골라준다.
-function cameraOptions() {
+// 인지 카메라(object_3d 등 인식 결과 영상) 여부
+function isPerceptionCamera(name) {
+  return /\/object_3d[^/]*\//.test(name) || name.includes('result_image') || name.includes('/perception/');
+}
+// 토픽이 속한 Camera Preview 탭: road(도로 인지) / perc(객체 인지) / cam(원본)
+function cameraTabOf(name) {
+  if (name.includes('/road_perception/')) return 'road';
+  return isPerceptionCamera(name) ? 'perc' : 'cam';
+}
+function cameraOptions(tab) {
+  let all = allCameraOptions();
+  // 같은 영상의 raw/compressed 가 둘 다 있으면 compressed 만 보여줌 (activeCameraFor 가 raw 지정도 compressed 로 대체)
+  const names = new Set(all.map((o) => o.name));
+  all = all.filter((o) => !names.has(o.name + '/compressed'));
+  return tab ? all.filter((o) => cameraTabOf(o.name) === tab) : all;
+}
+function allCameraOptions() {
   const byName = new Map();
   for (const camera of state.cameras) {
     if (isPlayTopic(camera.name)) continue;
@@ -2436,6 +3167,7 @@ function cameraOptions() {
   }
   for (const topic of state.topics) {
     if (isPlayTopic(topic.name)) continue;
+    if (topic.name.endsWith('/preview/compressed')) continue;   // 하드웨어 미리보기는 원본 슬롯에 자동 대체
     if (topic.type === 'sensor_msgs/msg/CompressedImage' || topic.name.includes('/object_3d/') && topic.name.includes('result_image')) {
       byName.set(topic.name, byName.get(topic.name) || { name: topic.name, age_sec: null, stream_url: `/stream?topic=${topic.name}` });
     }
@@ -2447,27 +3179,51 @@ function cameraOptions() {
 function activeCameraFor(slot) {
   if (!slot || !slot.topic) return null;
   const want = effectiveTopic(slot.topic);
-  return state.cameras.find((c) => c.name === want) || null;
+  // raw 토픽이 없으면 같은 이름의 /compressed (예: object_3d 결과 영상)로 대체
+  return state.cameras.find((c) => c.name === want) || state.cameras.find((c) => c.name === want + '/compressed') || null;
 }
 
 function saveCameraLayout() {
-  localStorage.setItem('rosWebCameraLayout', JSON.stringify(view.cameraLayout));
+  localStorage.setItem('rosWebCameraLayout', JSON.stringify(view.cameraLayouts.cam));
+  localStorage.setItem('rosWebPercCameraLayout', JSON.stringify(view.cameraLayouts.perc));
+  localStorage.setItem('rosWebRoadCameraLayout', JSON.stringify(view.cameraLayouts.road));
+}
+function allCameraSlots() { return CAM_TABS.flatMap((t) => view.cameraLayouts[t].slots); }
+function camEditing(tab) { return view.cameraEditMode && tab === view.camTab; }
+
+function applyCamGrid(tab = view.camTab) {
+  const layout = view.cameraLayouts[tab];
+  const grid = CAM_GRIDS[tab];
+  const cols = layout.cols || 2;
+  const totalItems = layout.slots.length + (camEditing(tab) ? 1 : 0);
+  const rows = Math.max(1, Math.ceil(totalItems / cols));
+  grid.style.setProperty('--cam-cols', cols);
+  grid.style.setProperty('--cam-rows', rows);
+  if (tab === view.camTab) {
+    document.querySelectorAll('.cam-col-btn').forEach((btn) => {
+      btn.classList.toggle('active', Number(btn.dataset.cols) === cols);
+    });
+  }
 }
 
-function applyCamGrid() {
-  const cols = view.cameraLayout.cols || 2;
-  const totalItems = view.cameraLayout.slots.length + (view.cameraEditMode ? 1 : 0);
-  const rows = Math.max(1, Math.ceil(totalItems / cols));
-  cameraGrid.style.setProperty('--cam-cols', cols);
-  cameraGrid.style.setProperty('--cam-rows', rows);
-  document.querySelectorAll('.cam-col-btn').forEach((btn) => {
-    btn.classList.toggle('active', Number(btn.dataset.cols) === cols);
-  });
+// 탭 전환: 카메라 탭 그리드는 주행 뷰(2D/3D)가 영상을 재사용하므로 숨김 상태에서도 스트림 유지,
+// 인지 카메라 탭은 보일 때만 스트림을 연다
+function setCamTab(tab) {
+  view.camTab = CAM_TABS.includes(tab) ? tab : 'cam';
+  try { localStorage.setItem('rosWebCamTab', view.camTab); } catch (e) { /* ignore */ }
+  document.querySelectorAll('#camTabs button').forEach((b) => b.classList.toggle('active', b.dataset.camtab === view.camTab));
+  for (const t of CAM_TABS) CAM_GRIDS[t].classList.toggle('cam-grid-bg', t !== view.camTab);
+  view.cameraOptionSig = '';
+  renderCameras();
 }
 
 let camDragId = null;
 
-function buildCameraCard(slot, options) {
+function buildCameraCard(slot, options, tab) {
+  const layout = view.cameraLayouts[tab];
+  if (slot.topic && !options.some((o) => o.name === slot.topic)) {
+    options = [{ name: slot.topic }, ...options];   // 아직 발행 안 된 토픽도 선택 상태 유지
+  }
   const card = document.createElement('article');
   card.className = 'camera-card';
   card.dataset.id = slot.id;
@@ -2489,20 +3245,20 @@ function buildCameraCard(slot, options) {
   select.addEventListener('change', () => {
     slot.topic = select.value;
     saveCameraLayout();
-    refreshCameraStream(card, slot, options);
+    refreshCameraStream(card, slot, tab);
   });
 
   // 삭제 버튼 (편집 모드에서만 표시)
   card.querySelector('.cam-remove-btn').addEventListener('click', () => {
-    view.cameraLayout.slots = view.cameraLayout.slots.filter((s) => s.id !== slot.id);
+    layout.slots = layout.slots.filter((s) => s.id !== slot.id);
     saveCameraLayout();
-    rebuildCameraGrid(options);
+    rebuildCameraGrid(tab);
   });
 
   // 드래그 핸들 (편집 모드 순서 변경)
   const dragHandle = card.querySelector('.cam-drag-handle');
   dragHandle.addEventListener('pointerdown', (e) => {
-    if (!view.cameraEditMode) return;
+    if (!camEditing(tab)) return;
     e.preventDefault();
     camDragId = slot.id;
     card.classList.add('cam-dragging');
@@ -2522,14 +3278,14 @@ function buildCameraCard(slot, options) {
       card.classList.remove('cam-dragging');
       document.querySelectorAll('.camera-card').forEach((c) => c.classList.remove('cam-drop-over'));
       if (target && target.dataset.id !== slot.id) {
-        const slots = view.cameraLayout.slots;
+        const slots = layout.slots;
         const fromIdx = slots.findIndex((s) => s.id === slot.id);
         const toIdx = slots.findIndex((s) => s.id === target.dataset.id);
         if (fromIdx >= 0 && toIdx >= 0) {
           const [moved] = slots.splice(fromIdx, 1);
           slots.splice(toIdx, 0, moved);
           saveCameraLayout();
-          rebuildCameraGrid(options);
+          rebuildCameraGrid(tab);
         }
       }
       camDragId = null;
@@ -2538,18 +3294,18 @@ function buildCameraCard(slot, options) {
     dragHandle.addEventListener('pointerup', onUp);
   });
 
-  refreshCameraStream(card, slot, options);
+  refreshCameraStream(card, slot, tab);
   return card;
 }
 
-function refreshCameraStream(card, slot, options) {
+function refreshCameraStream(card, slot, tab) {
   const camera = activeCameraFor(slot);
   const img = card.querySelector('img');
   const title = card.querySelector('b');
   const age = card.querySelector('span');
   if (!camera || !slot.topic) {
     if (img.dataset.topic) stopCameraStream(img);
-    title.textContent = slot.topic ? (slot.topic.split('/').filter(Boolean)[0] || slot.topic) : '—';
+    title.textContent = slot.topic ? cameraLabel(slot.topic) : '—';
     age.textContent = slot.topic ? '수신 없음' : '';
     applyCameraSignalState(card, null, slot);
     return;
@@ -2557,16 +3313,18 @@ function refreshCameraStream(card, slot, options) {
   // 카메라 스트림은 보조 포트로 분리하고, 슬롯 순서대로 여러 포트에 나눠 접속
   // (브라우저의 호스트:포트당 동시연결 한도 6 → 7번째 슬롯부터 검은 화면 방지)
   const ports = state.streamPorts || [];
-  const slotIdx = Math.max(0, view.cameraLayout.slots.findIndex((sl) => sl.id === slot.id));
+  // 인지 카메라 탭은 카메라 탭 슬롯 뒤 번호로 이어서 포트를 나눔 (두 탭이 같은 포트에 몰리지 않게)
+  const slotIdx = Math.max(0, view.cameraLayouts[tab].slots.findIndex((sl) => sl.id === slot.id))
+    + CAM_TABS.slice(0, CAM_TABS.indexOf(tab)).reduce((n, t) => n + view.cameraLayouts[t].slots.length, 0);
   const port = ports.length ? ports[slotIdx % ports.length] : null;
   const base = port ? `${location.protocol}//${location.hostname}:${port}` : '';
-  const streamUrl = `${base}${camera.stream_url}${camera.stream_url.includes('?') ? '&' : '?'}id=${slot.id}`;
-  if (img.dataset.topic !== camera.name) {
+  const streamUrl = `${base}${camera.stream_url}${camera.stream_url.includes('?') ? '&' : '?'}id=${slot.id}${calRectParam(camera.name)}`;
+  if (img.dataset.topic !== camera.name || img.dataset.baseurl !== streamUrl) {
     img.dataset.topic = camera.name;
     img.dataset.baseurl = streamUrl;
     startCameraStream(img, streamUrl);
   }
-  title.textContent = camera.name.split('/').filter(Boolean).slice(-1)[0] || camera.name;
+  title.textContent = cameraLabel(camera.name);
   age.textContent = camera.age_sec == null ? 'waiting' : `${camera.age_sec}s ago`;
   applyCameraSignalState(card, camera, slot);
 }
@@ -2575,11 +3333,20 @@ function refreshCameraStream(card, slot, options) {
 //  - 토픽 미지정 → empty
 //  - 토픽 지정했지만 발행 안 됨, 또는 마지막 프레임이 오래됨 → stale('신호 없음')
 const CAMERA_STALE_SEC = 3;
+// 카드 제목: '/object_3d/Front_120_Camera/result_image/compressed' → 'Front_120_Camera'
+const CAMERA_GENERIC_SEG = new Set(['object_3d', 'road_perception', 'bagplay', 'image_raw', 'compressed', 'result_image', 'preview', 'image', 'perception']);
+function cameraLabel(name) {
+  const segs = name.split('/').filter(Boolean);
+  return segs.find((x) => !CAMERA_GENERIC_SEG.has(x)) || segs.slice(-1)[0] || name;
+}
 function applyCameraSignalState(card, camera, slot) {
   const empty = !slot.topic;
   const waiting = !!camera && camera.age_sec == null;
-  // Play 는 녹화 공백(1~4초)이 그대로 재생되므로 끊김 판정을 늦춤
-  const staleSec = view.mode === 'play' ? CAMERA_STALE_SEC * 2 : CAMERA_STALE_SEC;
+  // Play 는 녹화 공백(1~4초)이 그대로 재생되므로 끊김 판정을 늦춤.
+  // 원래 느린 토픽(예: 인식 결과 영상 수 초 간격)은 평소 프레임 간격의 3배까지 기다림 (최대 90초)
+  // 인지 결과 영상은 추론 부하에 따라 간격이 흔들리므로 기본 6초
+  const base = (view.mode === 'play' ? 2 : 1) * (camera && isPerceptionCamera(camera.name) ? 6 : CAMERA_STALE_SEC);
+  const staleSec = Math.max(base, Math.min(90, ((camera && camera.interval_sec) || 0) * 3));
   const stale = !empty && (!camera || (!waiting && camera.age_sec > staleSec));
   card.classList.toggle('cam-empty', empty);
   card.classList.toggle('cam-waiting', waiting);
@@ -2615,65 +3382,124 @@ function startCameraStream(img, baseUrl) {
   load();
 }
 
-function rebuildCameraGrid(options) {
-  cameraGrid.querySelectorAll('img').forEach(stopCameraStream);   // 기존 스트림 연결 정리 후 다시 만듦
-  cameraGrid.innerHTML = '';
-  applyCamGrid();
-  for (const slot of view.cameraLayout.slots) {
-    cameraGrid.appendChild(buildCameraCard(slot, options));
+function rebuildCameraGrid(tab = view.camTab) {
+  const grid = CAM_GRIDS[tab];
+  const layout = view.cameraLayouts[tab];
+  const options = cameraOptions(tab);
+  grid.querySelectorAll('img').forEach(stopCameraStream);   // 기존 스트림 연결 정리 후 다시 만듦
+  grid.innerHTML = '';
+  applyCamGrid(tab);
+  for (const slot of layout.slots) {
+    grid.appendChild(buildCameraCard(slot, options, tab));
   }
   // 편집 모드: 빈 슬롯 추가 버튼 (그리드 마지막)
-  if (view.cameraEditMode) {
+  if (camEditing(tab)) {
     const addCard = document.createElement('button');
     addCard.className = 'cam-add-card-btn';
     addCard.type = 'button';
     addCard.title = '카메라 추가';
     addCard.textContent = '＋';
     addCard.addEventListener('click', () => {
-      view.cameraLayout.slots.push({ id: 'c' + Date.now(), topic: '' });
+      layout.slots.push({ id: CAM_SLOT_PREFIX[tab] + Date.now(), topic: '' });
       saveCameraLayout();
-      rebuildCameraGrid(options);
+      rebuildCameraGrid(tab);
     });
-    cameraGrid.appendChild(addCard);
+    grid.appendChild(addCard);
   }
-  cameraGrid.classList.toggle('cam-edit', view.cameraEditMode);
+  grid.classList.toggle('cam-edit', camEditing(tab));
   document.getElementById('cameraEditBar').hidden = !view.cameraEditMode;
 }
 
+const camTabSigs = {};
 function renderCameras() {
-  const options = cameraOptions();
-  // view.mode를 시그니처에 포함시켜 실시간⇄Play 전환 시 스트림이 다시 매칭되게 함
-  const sig = options.map((o) => o.name).join('|') + '|' + view.cameraLayout.slots.length + '|' + view.cameraEditMode + '|' + view.mode;
-  if (sig !== view.cameraOptionSig) {
-    view.cameraOptionSig = sig;
-    rebuildCameraGrid(options);
-  } else {
-    // 스트림 연결 상태·age 갱신. 나중에 나타난 카메라(예: Play 시작 직후의 /bagplay 토픽)는
-    // 여기서 스트림을 시작한다 (이전에는 새로고침해야 연결됐음)
-    for (const slot of view.cameraLayout.slots) {
-      const card = cameraGrid.querySelector(`.camera-card[data-id="${CSS.escape(slot.id)}"]`);
-      if (card) refreshCameraStream(card, slot, options);
+  if (!view.cameraOptionSig) { CAM_TABS.forEach((t) => { camTabSigs[t] = ''; }); view.cameraOptionSig = 'set'; }
+  for (const tab of CAM_TABS) {
+    const grid = CAM_GRIDS[tab];
+    const layout = view.cameraLayouts[tab];
+    const active = tab === view.camTab;
+    if (tab !== 'cam' && (!active || roadIpm.active)) {
+      // 숨겨진 인지 탭(객체·도로)은 연결을 닫아 둠 (차선 범위 편집 중에는 보이는 탭도)
+      if (camTabSigs[tab] !== 'off') { grid.querySelectorAll('img').forEach(stopCameraStream); grid.innerHTML = ''; camTabSigs[tab] = 'off'; }
+      continue;
+    }
+    const options = cameraOptions(tab);
+    // view.mode를 시그니처에 포함시켜 실시간⇄Play 전환 시 스트림이 다시 매칭되게 함
+    const sig = options.map((o) => o.name).join('|') + '|' + layout.slots.length + '|' + camEditing(tab) + '|' + view.mode;
+    if (sig !== camTabSigs[tab]) {
+      camTabSigs[tab] = sig;
+      rebuildCameraGrid(tab);
+    } else {
+      // 스트림 연결 상태·age 갱신. 나중에 나타난 카메라(예: Play 시작 직후의 /bagplay 토픽)는
+      // 여기서 스트림을 시작한다 (이전에는 새로고침해야 연결됐음)
+      for (const slot of layout.slots) {
+        const card = grid.querySelector(`.camera-card[data-id="${CSS.escape(slot.id)}"]`);
+        if (card) refreshCameraStream(card, slot, tab);
+      }
     }
   }
-  cameraStatus.textContent = `${view.cameraLayout.slots.length}개 슬롯 · ${options.length}개 토픽`;
+  const counts = {};
+  for (const tab of CAM_TABS) {
+    const n = view.cameraLayouts[tab].slots.filter((sl) => activeCameraFor(sl)).length;
+    counts[tab] = n;
+    const badge = document.querySelector(`#camTabs button[data-camtab="${tab}"] em`);
+    if (badge) badge.textContent = `${n}/${view.cameraLayouts[tab].slots.length}`;
+  }
+  cameraStatus.textContent = `${view.cameraLayout.slots.length}개 슬롯 · ${cameraOptions(view.camTab).length}개 토픽`;
 }
+
+// 토픽 탭 필터: 상태(전체/활성/대기/오류) · 그룹 칩. 그룹 select 는 숨기고 칩과 동기화
+view.topicStatus = localStorage.getItem('rosWebTopicStatus') || 'all';
+view.topicGroup = localStorage.getItem('rosWebTopicGroup') || 'all';
+function topicMatchesGroup(topic, g) {
+  if (g === 'all') return true;
+  const tg = groupForTopic(topic);
+  return g === 'other' ? !GROUP_META[tg] : tg === g;
+}
+function renderTopicFilters(all) {
+  const sumEl = document.getElementById('topicSummary');
+  const chipEl = document.getElementById('topicGroupChips');
+  if (!sumEl || !chipEl) return;
+  const cnt = { all: all.length, active: 0, idle: 0, error: 0 };
+  for (const t of all) cnt[topicStatusOf(t)] += 1;
+  const st = [['all', '전체'], ['active', '활성'], ['idle', '대기'], ['error', '오류']];
+  const sumHtml = st.map(([k, l]) => `<button type="button" class="ts-chip ts-${k}${view.topicStatus === k ? ' on' : ''}" data-status="${k}">${k === 'all' ? '' : '<i></i>'}<span>${l}</span><b>${cnt[k]}</b></button>`).join('');
+  const gcount = { all: all.length, other: 0 };
+  for (const t of all) { const g = groupForTopic(t); if (GROUP_META[g]) gcount[g] = (gcount[g] || 0) + 1; else gcount.other += 1; }
+  const groups = ['all', ...GROUP_ORDER.filter((g) => gcount[g]), ...(gcount.other ? ['other'] : [])];
+  const chipHtml = groups.map((g) => {
+    const m = g === 'all' ? { label: '모든 그룹', color: '#c9d6e2' } : g === 'other' ? { label: '기타', color: '#8996a6' } : groupMeta(g);
+    return `<button type="button" class="tg-chip${view.topicGroup === g ? ' on' : ''}" data-group="${g}" style="--gc:${m.color}">${g === 'all' ? '' : uiIcon(g, 13)}<span>${m.label}</span><b>${gcount[g] || 0}</b></button>`;
+  }).join('');
+  if (sumEl.innerHTML !== sumHtml) sumEl.innerHTML = sumHtml;
+  if (chipEl.innerHTML !== chipHtml) chipEl.innerHTML = chipHtml;
+}
+function hzPct(hz) { return Math.max(0, Math.min(100, Math.log10(1 + hz) / Math.log10(101) * 100)); }
 
 function renderTopics() {
   const query = searchInput.value.trim().toLowerCase();
-  const group = groupFilter.value;
-  const rows = currentModeTopics().filter((topic) => {
+  const group = view.topicGroup;
+  const all = currentModeTopics();
+  renderTopicFilters(all);
+  const rows = all.filter((topic) => {
     if (activeOnly.checked && !topic.active) return false;
-    if (group !== 'all' && groupForTopic(topic) !== group) return false;
+    if (view.topicStatus !== 'all' && topicStatusOf(topic) !== view.topicStatus) return false;
+    if (!topicMatchesGroup(topic, group)) return false;
     if (!query) return true;
     return topic.name.toLowerCase().includes(query) || topic.type.toLowerCase().includes(query);
   });
-  shownCount.textContent = `${rows.length} shown`;
+  shownCount.textContent = `${rows.length} / ${all.length} 표시`;
   if (!rows.length) { topicRows.innerHTML = '<tr><td class="empty" colspan="4">조건에 맞는 토픽이 없습니다.</td></tr>'; return; }
   const expanded = new Set([...topicRows.querySelectorAll('.topic-detail-row:not([hidden])')].map((r) => r.dataset.topic));
   topicRows.innerHTML = rows.map((topic) => {
-    const subFail = topic.error && (topic.error.includes('Failed to create') || topic.error.includes('invalid allocator'));
-    const status = (topic.error && !subFail) ? 'error' : topic.active ? 'active' : 'idle';
-    const age = topic.age_sec === null ? '-' : `${topic.age_sec.toFixed(1)}s`;
+    const status = topicStatusOf(topic);
+    const age = topic.age_sec === null ? '-' : topic.age_sec >= 100 ? `${Math.round(topic.age_sec)}s` : `${topic.age_sec.toFixed(1)}s`;
+    const ageLv = topic.age_sec === null ? 'na' : topic.age_sec < 1.5 ? 'ok' : topic.age_sec < 5 ? 'warn' : 'bad';
+    const g = groupForTopic(topic);
+    const gm = groupMeta(g);
+    const cut = topic.name.lastIndexOf('/');
+    const ns = cut > 0 ? topic.name.slice(0, cut + 1) : '/';
+    const leaf = topic.name.slice(cut + 1);
+    const pkg = topic.type.split('/')[0] || '';
     const tid = 'td-' + CSS.escape(topic.name.replace(/\//g, '_'));
     const isExpanded = expanded.has(topic.name);
     const typeShort = topic.type.split('/').pop();
@@ -2690,10 +3516,11 @@ function renderTopics() {
           ).join('')}
         </div>`
       : `<div class="td-params"><div class="td-no-val">실시간 값 데이터 없음</div></div>`;
-    return `<tr class="topic-row${isExpanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
-      <td><span class="pill ${status}">${status}</span></td>
-      <td class="topic">${escapeHtml(topic.name)}<span class="type-line">${escapeHtml(topic.type)}</span></td>
-      <td>${topic.rate_hz.toFixed(1)}</td><td>${age}</td>
+    return `<tr class="topic-row st-${status}${isExpanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}" style="--gc:${gm.color}">
+      <td class="t-state" title="${status}"><i class="sdot ${status}"></i></td>
+      <td class="topic" title="${escapeHtml(topic.name)}"><span class="t-name"><span class="t-ns">${escapeHtml(ns)}</span><b>${escapeHtml(leaf)}</b></span><span class="type-line"><em class="t-type">${escapeHtml(typeShort)}</em><span class="t-pkg">${escapeHtml(pkg)}</span></span></td>
+      <td class="t-hz"><span>${topic.rate_hz.toFixed(1)}</span><i class="hzbar"><b style="width:${hzPct(topic.rate_hz).toFixed(0)}%"></b></i></td>
+      <td class="t-age age-${ageLv}">${age}</td>
     </tr>
     <tr class="topic-detail-row" data-topic="${escapeHtml(topic.name)}"${isExpanded ? '' : ' hidden'}>
       <td colspan="4" class="topic-detail">
@@ -2711,6 +3538,24 @@ function renderTopics() {
 }
 
 // 토픽 행 클릭은 이벤트 위임(1회 바인딩) — 매 렌더마다 수백 개 리스너 재바인딩 제거
+document.getElementById('topicSummary').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-status]');
+  if (!b) return;
+  view.topicStatus = b.dataset.status;
+  try { localStorage.setItem('rosWebTopicStatus', view.topicStatus); } catch (err) { /* ignore */ }
+  renderTopics();
+});
+document.getElementById('topicGroupChips').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-group]');
+  if (!b) return;
+  setTopicGroup(b.dataset.group);
+});
+function setTopicGroup(g) {
+  view.topicGroup = g;
+  try { localStorage.setItem('rosWebTopicGroup', g); } catch (err) { /* ignore */ }
+  if ([...groupFilter.options].some((o) => o.value === g)) groupFilter.value = g;
+  renderTopics();
+}
 topicRows.addEventListener('click', (e) => {
   const row = e.target.closest('.topic-row');
   if (!row) return;
@@ -2820,14 +3665,36 @@ function saveCustomLayout() {
 // ── 탭 드래그 상태
 let tabDragId = null;
 
+// 탭 배지: 토픽 활성/전체 · 센서 건강도 · CPU 사용률 (매 갱신, 가벼움)
+function updateLeftTabBadges() {
+  const nav = document.getElementById('leftTabs');
+  if (!nav) return;
+  const topics = currentModeTopics();
+  const active = topics.filter((t) => t.active).length;
+  const errors = topics.filter((t) => topicStatusOf(t) === 'error').length;
+  const set = (id, text, lv) => {
+    const el = nav.querySelector(`[data-badge="${id}"]`);
+    if (!el) return;
+    if (el.textContent !== text) el.textContent = text;
+    el.className = 'lt-badge' + (lv ? ' lv-' + lv : '');
+  };
+  set('topics', topics.length ? `${active}/${topics.length}` : '', errors ? 'high' : '');
+  const main = topics.filter((t) => GROUP_META[groupForTopic(t)]);
+  const health = main.length ? Math.round(main.filter((t) => t.active).length / main.length * 100) : null;
+  set('groups', health == null ? '' : `${health}%`, health == null ? '' : health >= 90 ? 'low' : health >= 60 ? 'mid' : 'high');
+  const cpu = state.system && state.system.cpu ? state.system.cpu.usage_percent : null;
+  set('system', cpu == null ? '' : `CPU ${Math.round(cpu)}%`, cpu == null ? '' : usageColor(cpu));
+}
+
 function renderLeftTabBar() {
   const nav = document.getElementById('leftTabs');
   if (!nav) return;
   nav.innerHTML = view.leftTabConfig.map((t) => `
     <button class="left-tab${t.id === view.leftTab ? ' active' : ''}" data-tab="${t.id}" type="button">
       <span class="left-tab-drag" data-tab="${t.id}">⠿</span>
-      <span>${t.label}</span>
+      ${uiIcon(t.id, 15)}<span class="left-tab-label">${t.label}</span><em class="lt-badge" data-badge="${t.id}"></em>
     </button>`).join('');
+  updateLeftTabBadges();
   nav.querySelectorAll('.left-tab').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       if (e.target.closest('.left-tab-drag')) return;
@@ -3135,7 +4002,7 @@ searchInput.addEventListener('input', () => {
   clearTimeout(searchDebounce);
   searchDebounce = setTimeout(renderTopics, 150);
 });
-groupFilter.addEventListener('change', renderTopics);
+groupFilter.addEventListener('change', () => setTopicGroup(groupFilter.value));
 activeOnly.addEventListener('change', renderTopics);
 window.addEventListener('resize', renderVisualization);
 window.addEventListener('resize', refreshGpsMap);
@@ -3149,7 +4016,7 @@ document.querySelectorAll('.cam-col-btn').forEach((btn) => {
   });
 });
 $('#camAddSlot').addEventListener('click', () => {
-  view.cameraLayout.slots.push({ id: 'c' + Date.now(), topic: '' });
+  view.cameraLayout.slots.push({ id: CAM_SLOT_PREFIX[view.camTab] + Date.now(), topic: '' });
   saveCameraLayout();
   view.cameraOptionSig = '';
   renderCameras();
@@ -3860,9 +4727,9 @@ function drawLabel(x, y, parts, border, placed) {
 }
 
 // Camera Preview 그리드에서 프레임이 있는 <img> (토픽별 1개) — 추가 연결 없이 재사용
-function liveCameraImgs() {
+function liveCameraImgs(sel = '.camera-grid img') {
   const out = new Map();
-  for (const im of document.querySelectorAll('#cameraGrid img')) {
+  for (const im of document.querySelectorAll(sel)) {
     if (im.dataset.topic && im.naturalWidth > 0 && !out.has(im.dataset.topic)) out.set(im.dataset.topic, im);
   }
   return out;
@@ -4315,14 +5182,14 @@ function renderDriveView() {
 // ── 설정 (통합 설정 창 → RViz 탭 '주행 뷰' 섹션) ──
 let driveEdit = null;
 function cameraTopicChoices() {
-  const set = new Set([...currentModeCameras().map((c) => logicalTopic(c.name)), ...view.cameraLayout.slots.map((sl) => logicalTopic(sl.topic)).filter(Boolean)]);
+  const set = new Set([...currentModeCameras().map((c) => logicalTopic(c.name)), ...allCameraSlots().map((sl) => logicalTopic(sl.topic)).filter(Boolean)]);
   if (driveEdit) driveEdit.cameras.forEach((t) => set.add(logicalTopic(t)));
   return [...set].sort();
 }
 function renderDriveCamList() {
   const el = $('#dsetCamList');
   if (!el || !driveEdit) return;
-  const inGrid = new Set(view.cameraLayout.slots.map((sl) => logicalTopic(sl.topic)).filter(Boolean));
+  const inGrid = new Set(view.cameraLayouts.cam.slots.map((sl) => logicalTopic(sl.topic)).filter(Boolean));
   const topics = cameraTopicChoices();
   const selectable = driveEdit.camMode === 'select';
   el.classList.toggle('disabled', !selectable);
@@ -4478,16 +5345,38 @@ const camZoomCanvas = $('#camZoomCanvas');
 const camZoomCtx = camZoomCanvas.getContext('2d');
 let camZoomTopic = null;
 let camZoomRaf = 0;
-function camZoomTopics() { return [...liveCameraImgs().keys()]; }
+// 확대 창 좌우 이동은 지금 보이는 탭의 카메라 안에서만
+function camZoomTopics() { return [...liveCameraImgs(`#${CAM_GRIDS[view.camTab].id} img`).keys()]; }
+// 확대 창은 원본 해상도 스트림(?full=1)을 따로 하나 열어서 그림 — 미리보기 그리드는 960px 축소본이라서.
+// 원본이 뜨기 전까지는 그리드 영상을 그대로 사용
+let camZoomFull = null;
+function setCamZoomFull(topic) {
+  if (camZoomFull) { stopCameraStream(camZoomFull); camZoomFull.remove(); camZoomFull = null; }
+  const cam = topic && state.cameras.find((c) => c.name === topic);
+  if (!cam) return;
+  const ports = state.streamPorts || [];
+  const port = ports.length ? ports[ports.length - 1] : null;
+  const base = port ? `${location.protocol}//${location.hostname}:${port}` : '';
+  const img = new Image();
+  img.dataset.topic = topic;
+  img.dataset.baseurl = `${base}${cam.stream_url}&full=1&id=zoom${calRectParam(topic)}`;
+  // 화면에 붙어 있어야 MJPEG 프레임이 계속 갱신됨 (1px, 보이지 않게)
+  img.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:0;top:0';
+  camZoomEl.appendChild(img);
+  startCameraStream(img, img.dataset.baseurl);
+  camZoomFull = img;
+}
 function openCamZoom(topic) {
   if (!topic) return;
   camZoomTopic = topic;
+  setCamZoomFull(topic);
   camZoomEl.hidden = false;
   if (!camZoomRaf) camZoomRaf = requestAnimationFrame(drawCamZoom);
 }
 function closeCamZoom() {
   camZoomEl.hidden = true;
   camZoomTopic = null;
+  setCamZoomFull(null);
   if (camZoomRaf) cancelAnimationFrame(camZoomRaf);
   camZoomRaf = 0;
 }
@@ -4496,6 +5385,7 @@ function stepCamZoom(dir) {
   if (!list.length) return;
   const i = list.indexOf(camZoomTopic);
   camZoomTopic = list[(i + dir + list.length) % list.length];
+  setCamZoomFull(camZoomTopic);
 }
 function drawCamZoom() {
   camZoomRaf = 0;
@@ -4507,7 +5397,8 @@ function drawCamZoom() {
   camZoomCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   camZoomCtx.fillStyle = '#000';
   camZoomCtx.fillRect(0, 0, W, H);
-  const img = liveCameraImgs().get(camZoomTopic);
+  const full = camZoomFull && camZoomFull.dataset.topic === camZoomTopic && camZoomFull.naturalWidth > 0 ? camZoomFull : null;
+  const img = full || liveCameraImgs().get(camZoomTopic);
   const cam = state.cameras.find((c) => c.name === camZoomTopic);
   if (img) {
     const sc = Math.min(W / img.naturalWidth, H / img.naturalHeight);
@@ -4538,11 +5429,15 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowRight') stepCamZoom(1);
 });
 // Camera Preview 카드 클릭 → 확대 (편집 모드 제외). 카드는 다시 만들어지므로 위임으로 처리
-cameraGrid.addEventListener('click', (e) => {
-  if (view.cameraEditMode) return;
-  const img = e.target.closest('.camera-card img');
-  if (img && img.dataset.topic) openCamZoom(img.dataset.topic);
-});
+for (const grid of Object.values(CAM_GRIDS)) {
+  grid.addEventListener('click', (e) => {
+    if (view.cameraEditMode) return;
+    const img = e.target.closest('.camera-card img');
+    if (img && img.dataset.topic) openCamZoom(img.dataset.topic);
+  });
+}
+document.querySelectorAll('#camTabs button').forEach((b) => b.addEventListener('click', () => setCamTab(b.dataset.camtab)));
+setCamTab(view.camTab);
 
 setDrivePreset(driveCam.preset);
 setVizTab(view.vizTab);

@@ -1,0 +1,25 @@
+{
+  "_meta": {
+    "app": "ros_web_monitor",
+    "version": 1,
+    "ts": "2026-11-05T06:02:37.361Z"
+  },
+  "settings": {
+    "rosWebVizTab": "drive3d",
+    "rosWebViewMode": "live",
+    "rosWebLayout": "custom",
+    "rosWebLeftTab": "system",
+    "rosWebCameraLayout": "{\"cols\":3,\"slots\":[{\"id\":\"c1789958048254\",\"topic\":\"/Front_60_Camera/image_raw/compressed\"},{\"id\":\"c1789958048904\",\"topic\":\"/Front_120_Camera/image_raw/compressed\"},{\"id\":\"c1789958050248\",\"topic\":\"/Front_30_Camera/image_raw/compressed\"},{\"id\":\"c1789958050998\",\"topic\":\"/Left_Front_Camera/image_raw/compressed\"},{\"id\":\"c1789958113830\",\"topic\":\"/avm_cam/image_raw\"},{\"id\":\"c1789958981854\",\"topic\":\"/Right_Front_Camera/image_raw/compressed\"},{\"id\":\"c1793857808364\",\"topic\":\"/Left_Rear_Camera/image_raw/compressed\"},{\"id\":\"c1793857810033\",\"topic\":\"/Rear_Camera/image_raw/compressed\"},{\"id\":\"c1793857811418\",\"topic\":\"/Right_Rear_Camera/image_raw/compressed\"}]}",
+    "rosWebDriveSettings": "{\"tracks\":true,\"clusters\":true,\"radar\":true,\"lidar\":true,\"path\":true,\"camMode\":\"select\",\"cameras\":[\"/Front_60_Camera/image_raw/compressed\"],\"camLayout\":\"strip\",\"range\":80,\"range2d\":30,\"laneWidth\":3.5,\"steerRatio\":14.5,\"wheelbase\":2.7}",
+    "rosWebPanelSizes": "{\"rviz\":{\"w\":64,\"h\":38},\"vehicle\":{\"w\":36,\"h\":56},\"camera\":{\"w\":64,\"h\":56},\"gps\":{\"w\":36,\"h\":38},\"objects\":{\"w\":36,\"h\":33},\"events\":{\"w\":64,\"h\":33}}",
+    "rosWebBagConfig": "{\"all\":true,\"topics\":[],\"light\":true}",
+    "rosWebCustomLayout": "{\"left\":[\"topics\",\"groups\",\"system\"],\"right\":[\"camera\",\"vehicle\",\"rviz\",\"gps\",\"events\",\"objects\"]}",
+    "rosWebVizSettings": "{\"maxPoints\":5000,\"range\":120,\"defaultZoom\":10}",
+    "rosWebSysSubTab": "all",
+    "rosWebHeaderConfig": "[{\"id\":\"title\",\"label\":\"ROS Web Monitor\",\"visible\":true},{\"id\":\"layout\",\"label\":\"Edit Layout\",\"visible\":true},{\"id\":\"viewmode\",\"label\":\"뷰 전환\",\"visible\":true},{\"id\":\"bag\",\"label\":\"Bag\",\"visible\":true},{\"id\":\"bagplay\",\"label\":\"Play\",\"visible\":true},{\"id\":\"reboot\",\"label\":\"⟳ 재부팅\",\"visible\":true},{\"id\":\"shutdown\",\"label\":\"⏻ 종료\",\"visible\":true},{\"id\":\"stat-topics\",\"label\":\"topics\",\"visible\":true},{\"id\":\"stat-active\",\"label\":\"active\",\"visible\":true},{\"id\":\"stat-cameras\",\"label\":\"cameras\",\"visible\":true}]",
+    "rosWebVizColorMode": "layer",
+    "rosWebLeftRows": "auto minmax(0px, 1fr)",
+    "rosWebVizLayers": "[{\"id\":\"l1\",\"name\":\"LiDAR\",\"color\":\"#64c8ff\",\"topic\":\"/Multi_Lidar_pointcloud\",\"visible\":true},{\"id\":\"l2\",\"name\":\"Front  Radar\",\"color\":\"#f1bf58\",\"topic\":\"/radar_markers/front\",\"visible\":true},{\"id\":\"l3\",\"name\":\"Rear  Radar\",\"color\":\"#f1bf58\",\"topic\":\"/radar_markers/rear\",\"visible\":true},{\"id\":\"l4\",\"name\":\"Cluster\",\"color\":\"#edf3ef\",\"topic\":\"/cluster_detections\",\"visible\":true},{\"id\":\"l5\",\"name\":\"Marker\",\"color\":\"#c791ff\",\"topic\":\"/vehicle_tracks\",\"visible\":false}]",
+    "rosWebDrivePreset": "chase"
+  }
+}

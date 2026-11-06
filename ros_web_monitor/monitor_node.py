@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import tempfile
@@ -36,6 +37,11 @@ import cv2
 import numpy as np
 import yaml
 from PIL import Image as PilImage
+
+try:
+    from road_perception import rectify as lens_rectify     # 렌즈 보정 (카메라 탭, 차선 범위 편집)
+except ImportError:
+    lens_rectify = None
 
 import rclpy
 from rclpy.node import Node
@@ -581,6 +587,20 @@ class MonitorNode(Node):
         self.declare_parameter('visual_max_points_per_topic', 900)
         self.declare_parameter('prune_after_sec', 10.0)
         self.declare_parameter('bag_dir', '/home/nvidia/robot_ws/bag')
+        # 브라우저용 카메라 미리보기: 원본(1920x1536, ~1MB) 대신 줄인 JPEG 를 보냄
+        # (GPU nvJPEG 로 디코딩·축소·인코딩, 실패 시 CPU). 0 = 끔(원본 그대로)
+        # road_perception 차선 인식 범위 (설정 창 '도로 인지' 탭에서 편집, 노드가 파일 변경을 감지해 바로 적용)
+        self.declare_parameter('lens_calibrator_port', 8090)
+        self.declare_parameter('calibration_apply_file', lens_rectify.SETTINGS_PATH if lens_rectify else '')
+        self.declare_parameter('intrinsics_dir', lens_rectify.INTRINSICS_DIR if lens_rectify else '')
+        self.lens_port = int(self.get_parameter('lens_calibrator_port').value)
+        self.lens_proc = None
+        self.lens_lock = threading.Lock()
+        self.declare_parameter('road_ipm_dir', '~/captin5_ws/src/road_perception/config/ipm')
+        self.declare_parameter('road_cameras_config', '')   # 비우면 road_perception 패키지의 config/cameras.yaml
+        self.declare_parameter('preview_width', 960)
+        self.declare_parameter('preview_fps', 12.0)
+        self.declare_parameter('preview_quality', 75)
 
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
@@ -597,6 +617,25 @@ class MonitorNode(Node):
         self.subscriptions_by_topic = {}
         self.camera_frames = {}
         self.camera_conditions = defaultdict(threading.Condition)
+        # raw Image 토픽 중 같은 이름의 /compressed 가 있는 것 → 구독하지 않고 compressed 수신률로 표시
+        # (raw 를 구독하면 카메라 노드가 프레임마다 6MB 를 이 노드에도 보내야 함)
+        self.mirrored_raw = {}
+        self.preview = PreviewTranscoder(
+            self, int(self.get_parameter('preview_width').value),
+            float(self.get_parameter('preview_fps').value),
+            int(self.get_parameter('preview_quality').value))
+        # 왜곡을 편 카메라 영상 (?rect=1). 보고 있는 토픽만, 켠 뒤에만 변환한다. 확대·범위 편집용은 원본 해상도.
+        self.lens_store = None
+        self.rect_preview = self.rect_full = None
+        if lens_rectify is not None:
+            self.calibration_apply_file = os.path.expanduser(str(self.get_parameter('calibration_apply_file').value))
+            self.lens_store = lens_rectify.LensStore(
+                'camera', self.calibration_apply_file, os.path.expanduser(str(self.get_parameter('intrinsics_dir').value)),
+                on_error=lambda text: self.get_logger().warn(text))
+            self.rect_preview = PreviewTranscoder(
+                self, int(self.get_parameter('preview_width').value), float(self.get_parameter('preview_fps').value),
+                int(self.get_parameter('preview_quality').value), suffix=RECT_SUFFIX, lens_store=self.lens_store)
+            self.rect_full = PreviewTranscoder(self, 1920, 6.0, 85, suffix=RECT_FULL_SUFFIX, lens_store=self.lens_store)
         self.topic_missing_since = {}
         self.visual_points = {}
         self.visual_boxes = {}
@@ -698,6 +737,7 @@ class MonitorNode(Node):
             self._logged_http = True
 
     def destroy_node(self):
+        self.lens_tool_stop()
         # 녹화 중이면 안전하게 종료/저장
         if getattr(self, 'bag_process', None) is not None and self.bag_process.poll() is None:
             try:
@@ -723,6 +763,7 @@ class MonitorNode(Node):
     def scan_topics(self):
         topics = self.get_topic_names_and_types()
         seen = set()
+        all_names = {name for name, _ in topics}
         for name, type_names in topics:
             if not type_names:
                 continue
@@ -731,6 +772,17 @@ class MonitorNode(Node):
             with self.lock:
                 self.stats.setdefault(name, TopicStats(name, type_name))
                 self.stats[name].type_name = type_name
+            if (type_name == 'sensor_msgs/msg/Image' and not is_streamable_raw_image_topic(name)
+                    and name + '/compressed' in all_names):
+                if name not in self.mirrored_raw:
+                    self.mirrored_raw[name] = name + '/compressed'
+                    sub = self.subscriptions_by_topic.pop(name, None)
+                    if sub is not None:
+                        try:
+                            self.destroy_subscription(sub)
+                        except Exception:
+                            pass
+                continue
             if self.subscribe_all and name not in self.subscriptions_by_topic:
                 self.subscribe_topic(name, type_name)
 
@@ -760,6 +812,9 @@ class MonitorNode(Node):
             except Exception:
                 pass
         self.camera_frames.pop(name, None)
+        for suffix in (PREVIEW_SUFFIX, RECT_SUFFIX, RECT_FULL_SUFFIX):
+            self.camera_frames.pop(name + suffix, None)
+        self.mirrored_raw.pop(name, None)
         self.visual_points.pop(name, None)
         self.visual_boxes.pop(name, None)
         self.visual_markers.pop(name, None)
@@ -851,6 +906,7 @@ class MonitorNode(Node):
                 'stamp': _now(),
                 'format': msg.format or 'jpeg',
                 'data': frame,
+                'interval': self._frame_interval(topic),
             }
         condition = self.camera_conditions[topic]
         with condition:
@@ -881,10 +937,20 @@ class MonitorNode(Node):
                 'stamp': _now(),
                 'format': 'jpeg',
                 'data': frame,
+                'interval': self._frame_interval(topic),
             }
         condition = self.camera_conditions[topic]
         with condition:
             condition.notify_all()
+
+    def _frame_interval(self, topic):
+        """카메라 프레임 간격 지수평균(초). self.lock 안에서 호출. 느린 인식 결과 영상의 끊김 판정용."""
+        prev = self.camera_frames.get(topic)
+        if not prev:
+            return None
+        dt = _now() - prev['stamp']
+        old = prev.get('interval')
+        return dt if old is None else old * 0.7 + dt * 0.3
 
     def should_process_visual(self, topic, min_interval=0.18):
         now = _now()
@@ -1521,12 +1587,25 @@ class MonitorNode(Node):
 
     def snapshot(self):
         with self.lock:
-            topics = [stat.snapshot(self.rate_window_sec) for stat in self.stats.values()]
+            topics = []
+            for stat in self.stats.values():
+                item = stat.snapshot(self.rate_window_sec)
+                src = self.mirrored_raw.get(stat.name)
+                if src and src in self.stats:
+                    # 구독하지 않은 raw 토픽: 같은 카메라 /compressed 의 수신률·상태로 표시
+                    m = self.stats[src].snapshot(self.rate_window_sec)
+                    item.update({k: m[k] for k in ('rate_hz', 'age_sec', 'active', 'total')})
+                    item['error'] = ''
+                    item['last_value'] = {'note': '미구독(대용량) — /compressed 수신 기준'}
+                topics.append(item)
             cameras = []
             for name, frame in self.camera_frames.items():
+                if is_preview_topic(name) or name.endswith((PREVIEW_SUFFIX, RECT_SUFFIX, RECT_FULL_SUFFIX)):
+                    continue   # 미리보기는 원본 카메라 스트림에 자동 대체되므로 목록에서 제외
                 cameras.append({
                     'name': name,
                     'age_sec': round(_now() - frame['stamp'], 2),
+                    'interval_sec': round(frame.get('interval') or 0.0, 2),
                     'stream_url': '/stream?topic=' + name,
                 })
         topics.sort(key=lambda item: item['name'])
@@ -1666,6 +1745,202 @@ class MonitorNode(Node):
                      'writable': os.access(base, os.W_OK)}
         except Exception as exc:
             return {'ok': False, 'error': str(exc)}
+
+    # ── road_perception 차선 인식 범위 ──
+    def _road_config(self):
+        path = str(self.get_parameter('road_cameras_config').value or '')
+        if not path:
+            path = os.path.join(get_package_share_directory('road_perception'), 'config', 'cameras.yaml')
+        with open(os.path.expanduser(path)) as f:
+            cc = yaml.safe_load(f) or {}
+        cams = {n: c for n, c in (cc.get('cameras') or {}).items()
+                if (c or {}).get('enabled', True) and 'lanes' in (c or {}).get('tasks', [])}
+        return cc, cams
+
+    def _road_ipm_path(self, camera):
+        return os.path.join(os.path.expanduser(str(self.get_parameter('road_ipm_dir').value)), f'{camera}.yaml')
+
+    def road_ipm_state(self):
+        """카메라별 현재 차선 인식 범위. corners = 범위 사각형의 영상 위 위치(0~1) — 가까운 왼쪽, 가까운 오른쪽, 먼 오른쪽, 먼 왼쪽."""
+        try:
+            cc, cams = self._road_config()
+        except Exception as exc:
+            return {'ok': False, 'error': f'road_perception 설정을 읽지 못함: {exc}'}
+        out = {}
+        for name, c in cams.items():
+            cfg = {**(cc.get('ipm_defaults') or {}), **(c.get('ipm') or {})}
+            path = self._road_ipm_path(name)
+            custom = os.path.isfile(path)
+            if custom:
+                try:
+                    with open(path) as f:
+                        cfg.update(yaml.safe_load(f) or {})
+                except Exception as exc:
+                    self.get_logger().warn(f'{path} 읽기 실패: {exc}')
+                    custom = False
+            x0, x1 = [float(v) for v in cfg.get('x_range', [2.0, 20.0])]
+            y0, y1 = [float(v) for v in cfg.get('y_range', [-6.0, 6.0])]
+            lens = self._road_lens(name)
+            # 파일은 원본 기준, 편집 화면은 편 영상 기준
+            src = np.float32(lens_rectify.rect_quad(cfg['src'], cfg['dst'], lens)) if lens is not None else np.float32(cfg['src'])
+            H = cv2.getPerspectiveTransform(np.float32(cfg['dst']), src)
+            corners = []
+            # w 부호는 행렬마다 다르므로 기준점(dst 첫 점)과 비교. 부호가 다르면 지평선 너머 → 사다리꼴 점으로 대체
+            ref = np.sign((H @ np.array([*cfg['dst'][0], 1.0]))[2]) or 1.0
+            for i, (gx, gy) in enumerate(((x0, y1), (x0, y0), (x1, y0), (x1, y1))):
+                u, v, w = H @ np.array([gx, gy, 1.0])
+                pt = [u / w, v / w] if w * ref > 1e-6 else [float(src[i][0]), float(src[i][1])]
+                corners.append([round(float(min(1.15, max(-0.15, q))), 4) for q in pt])   # 편집 화면 여백까지만
+            out[name] = {'corners': corners, 'near': round(x0, 2), 'far': round(x1, 2), 'width': round(y1 - y0, 2),
+                         'offset': round((y0 + y1) / 2, 2), 'calibrated': bool(cfg.get('calibrated', False)), 'custom': custom,
+                         'rect': lens is not None}
+        return {'ok': True, 'cameras': out}
+
+    def _road_lens(self, camera):
+        """도로 인지 탭에 보정이 켜져 있고 렌즈 값이 있으면 Lens. 인지 노드와 같은 판단."""
+        if self.lens_store is None or not lens_rectify.read_settings(self.calibration_apply_file).get('road', True):
+            return None
+        return self.lens_store.load(camera)
+
+    def calibration_apply_state(self):
+        if self.lens_store is None:
+            return {'ok': False, 'error': 'road_perception 패키지를 찾지 못했습니다'}
+        settings = lens_rectify.read_settings(self.calibration_apply_file)
+        return {'ok': True, 'settings': settings,
+                'cameras': {c: self.lens_store.load(c) is not None for c in lens_rectify.CAMERAS}}
+
+    def calibration_apply_save(self, body):
+        if self.lens_store is None:
+            return {'ok': False, 'error': 'road_perception 패키지를 찾지 못했습니다'}
+        if not isinstance(body, dict) or not all(isinstance(body[k], bool) for k in body):
+            return {'ok': False, 'error': '잘못된 값'}
+        try:
+            lens_rectify.write_settings(body, self.calibration_apply_file)
+        except OSError as exc:
+            return {'ok': False, 'error': f'저장 실패: {exc}'}
+        return self.calibration_apply_state()
+
+    def road_ipm_save(self, body):
+        try:
+            _, cams = self._road_config()
+            camera = str(body.get('camera', ''))
+            if camera not in cams:
+                return {'ok': False, 'error': f'차선 인식 카메라가 아님: {camera}'}
+            src = [[float(a), float(b)] for a, b in body['corners']]
+            near, far, width = float(body['near']), float(body['far']), float(body['width'])
+            offset = float(body.get('offset', 0.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            return {'ok': False, 'error': f'잘못된 값: {exc}'}
+        if len(src) != 4 or not all(math.isfinite(q) and -0.5 <= q <= 1.5 for pt in src for q in pt):
+            return {'ok': False, 'error': '꼭짓점 4개가 영상 범위를 벗어남'}
+        if not (0.0 <= near < far <= 120.0 and 0.5 <= width <= 60.0 and abs(offset) <= 30.0):
+            return {'ok': False, 'error': '거리 또는 폭이 허용 범위를 벗어남 (0 ≤ 가까운 거리 < 먼 거리 ≤ 120 m, 폭 0.5~60 m)'}
+        cross = [(src[(i + 1) % 4][0] - src[i][0]) * (src[(i + 2) % 4][1] - src[(i + 1) % 4][1])
+                 - (src[(i + 1) % 4][1] - src[i][1]) * (src[(i + 2) % 4][0] - src[(i + 1) % 4][0]) for i in range(4)]
+        if not (all(c > 1e-5 for c in cross) or all(c < -1e-5 for c in cross)):
+            return {'ok': False, 'error': '꼭짓점이 꼬였거나 일직선임 — 볼록한 사각형이어야 함'}
+        if body.get('rect'):    # 편집 화면은 편 영상 기준 → 파일에는 항상 원본 기준으로 저장
+            lens = self.lens_store.load(camera) if self.lens_store is not None else None
+            if lens is None:
+                return {'ok': False, 'error': f'{camera} 보정값이 없어 저장할 수 없습니다. 도로 인지 탭을 다시 여세요'}
+            W, H_ = lens.size
+            src = (lens.rect_to_raw(np.array(src) * [W, H_]) / [W, H_]).tolist()
+        hw = width / 2
+        cfg = {
+            'calibrated': bool(body.get('calibrated', False)),
+            'src_normalized': True,
+            'src': src,
+            'dst': [[near, offset + hw], [near, offset - hw], [far, offset - hw], [far, offset + hw]],
+            'x_range': [near, far],
+            'y_range': [offset - hw, offset + hw],
+            'resolution': round(max(0.05, max(far - near, width) / 800.0), 4),   # BEV 크기 제한
+            'note': time.strftime('%Y-%m-%d %H:%M') + ' 웹 설정',
+        }
+        path = self._road_ipm_path(camera)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if os.path.isfile(path):                  # 어안 보정값은 유지
+                with open(path) as f:
+                    old = yaml.safe_load(f) or {}
+                for k in ('camera_matrix', 'dist_coeffs', 'fisheye'):
+                    if k in old:
+                        cfg[k] = old[k]
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
+            with os.fdopen(fd, 'w') as f:
+                yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+            os.replace(tmp, path)
+        except OSError as exc:
+            return {'ok': False, 'error': f'저장 실패: {exc}'}
+        return self.road_ipm_state()
+
+    def road_ipm_reset(self, camera):
+        try:
+            _, cams = self._road_config()
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+        if camera not in cams:
+            return {'ok': False, 'error': f'차선 인식 카메라가 아님: {camera}'}
+        path = self._road_ipm_path(camera)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as exc:
+            return {'ok': False, 'error': f'삭제 실패: {exc}'}
+        return self.road_ipm_state()
+
+    # ── 렌즈 보정 도구 (설정 탭을 여는 동안만 별도 프로세스로 실행) ──
+    def _lens_port_open(self):
+        try:
+            with socket.create_connection(('127.0.0.1', self.lens_port), timeout=0.3):
+                return True
+        except OSError:
+            return False
+
+    def _lens_log_path(self):
+        return os.path.expanduser('~/.ros/lens_calibrator.log')
+
+    def lens_tool_state(self):
+        proc = self.lens_proc
+        out = {'ok': True, 'running': self._lens_port_open(), 'port': self.lens_port,
+               'owned': proc is not None and proc.poll() is None}
+        if proc is not None and proc.poll() is not None:
+            try:
+                with open(self._lens_log_path(), errors='replace') as f:
+                    tail = f.read().strip().splitlines()[-1:]
+            except OSError:
+                tail = []
+            out['ok'] = False
+            out['error'] = '보정 도구가 시작 직후 종료됐습니다' + (f': {tail[0][:200]}' if tail else '')
+        return out
+
+    def lens_tool_start(self):
+        with self.lens_lock:
+            if (self.lens_proc is None or self.lens_proc.poll() is not None) and not self._lens_port_open():
+                try:
+                    os.makedirs(os.path.dirname(self._lens_log_path()), exist_ok=True)
+                    with open(self._lens_log_path(), 'w') as log:
+                        self.lens_proc = subprocess.Popen(
+                            [_sys.executable, '-m', 'road_perception.lens_calibrator', '--port', str(self.lens_port)],
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                except OSError as exc:
+                    return {'ok': False, 'error': f'보정 도구 실행 실패: {exc}'}
+        return self.lens_tool_state()
+
+    def lens_tool_stop(self):
+        """이 모니터가 켠 프로세스만 끈다. 터미널에서 따로 켠 도구는 건드리지 않는다."""
+        with self.lens_lock:
+            proc, self.lens_proc = self.lens_proc, None
+            if proc is None or proc.poll() is not None:
+                return self.lens_tool_state()
+            try:
+                os.killpg(proc.pid, signal.SIGINT)
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+            except ProcessLookupError:
+                pass
+        return self.lens_tool_state()
 
     def make_dir(self, path, name):
         """폴더 탐색기에서 새 하위 폴더 생성."""
@@ -2105,6 +2380,149 @@ def parse_image_header(data):
         return {}
 
 
+PREVIEW_SUFFIX = '@preview'
+RECT_SUFFIX = '@rect'
+RECT_FULL_SUFFIX = '@rectfull'
+
+
+class PreviewTranscoder:
+    """
+    브라우저로 보내는 카메라 MJPEG 를 줄인 JPEG 로 바꿔 둔다 (camera_frames[topic + '@preview']).
+    원본 1920x1536 JPEG(~1MB)를 카메라 8대 x 10Hz 로 보내면 브라우저가 디코딩에만 CPU 2코어 이상을 씀.
+    스트림 클라이언트가 보고 있는 토픽만, preview_fps 이하로, 여러 토픽을 한 번에(배치) 처리.
+    GPU(torchvision nvJPEG: 디코딩 → 축소 → 인코딩)가 기본이고 안 되면 CPU(축소 디코딩)로.
+    """
+
+    def __init__(self, node, width, fps, quality, suffix=PREVIEW_SUFFIX, lens_store=None):
+        self.node = node
+        self.suffix = suffix
+        self.lens_store = lens_store    # 있으면 왜곡을 펴서 낸다. 그 카메라의 보정값이 없으면 그대로
+        self.width = max(0, int(width))
+        self.period = 1.0 / max(1.0, float(fps))
+        self.quality = max(30, min(95, int(quality)))
+        self.demand = {}        # topic -> 마지막 요청 시각
+        self.last_src = {}      # topic -> 마지막으로 변환한 원본 stamp
+        self.last_out = {}      # topic -> 마지막 출력 시각
+        self.backend = None
+        self.event = threading.Event()
+        if self.width:
+            threading.Thread(target=self.run, daemon=True, name='preview-transcoder').start()
+
+    def handles(self, topic):
+        return bool(self.width) and topic.endswith('/image_raw/compressed')
+
+    def _lens(self, topic):
+        if self.lens_store is None:
+            return None
+        parts = [p for p in topic.split('/') if p]
+        return self.lens_store.load(parts[0]) if parts else None
+
+    def want(self, topic):
+        self.demand[topic] = _now()
+        self.event.set()
+
+    def _init_backend(self):
+        try:
+            import torch
+            import torch.nn.functional as F
+            from torchvision.io import decode_jpeg, encode_jpeg
+            if not torch.cuda.is_available():
+                raise RuntimeError('CUDA 없음')
+            self._torch, self._F, self._dec, self._enc = torch, F, decode_jpeg, encode_jpeg
+            self.backend = 'gpu'
+        except Exception as exc:
+            self.node.get_logger().warn(f'미리보기 GPU 변환 사용 불가({exc}) → CPU')
+            self.backend = 'cpu'
+        self.node.get_logger().info(f'카메라 미리보기 변환: {self.width}px, {1.0 / self.period:.0f}Hz, {self.backend}')
+
+    def _gpu(self, topics, datas):
+        torch, F = self._torch, self._F
+        with torch.inference_mode():
+            imgs = self._dec([torch.frombuffer(bytearray(d), dtype=torch.uint8) for d in datas], device='cuda')
+            outs = []
+            for topic, im in zip(topics, imgs):
+                h, w = int(im.shape[1]), int(im.shape[2])
+                lens = self._lens(topic)
+                if lens is not None and lens.matches(w, h):
+                    # 먼저 원본 해상도에서 편 뒤 아래에서 축소 (앨리어싱 방지)
+                    im = lens_rectify.warp_tensor(im, lens.grid_tensor(w, h, im.device))
+                if w > self.width:
+                    nh = max(2, round(h * self.width / w))
+                    im = F.interpolate(im.unsqueeze(0).float(), size=(nh, self.width), mode='bilinear',
+                                       antialias=True, align_corners=False).squeeze(0).round_().clamp_(0, 255).to(torch.uint8)
+                outs.append(im.contiguous())
+            return [e.cpu().numpy().tobytes() for e in self._enc(outs, quality=self.quality)]
+
+    def _cpu(self, topic, data):
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_REDUCED_COLOR_2)
+        if img is None:
+            return None
+        lens = self._lens(topic)
+        if lens is not None and abs(img.shape[1] / img.shape[0] - lens.size[0] / lens.size[1]) < 0.01:
+            img = lens.remap(img)
+        if img.shape[1] > self.width:
+            img = cv2.resize(img, (self.width, max(2, round(img.shape[0] * self.width / img.shape[1]))),
+                             interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+        return buf.tobytes() if ok else None
+
+    def run(self):
+        node = self.node
+        while rclpy.ok():
+            self.event.wait(timeout=1.0)
+            self.event.clear()
+            now = _now()
+            due = []
+            with node.lock:
+                for topic, t in list(self.demand.items()):
+                    if now - t > 3.0:
+                        self.demand.pop(topic, None)
+                        node.camera_frames.pop(topic + self.suffix, None)
+                        continue
+                    f = node.camera_frames.get(topic)
+                    if not f or f['stamp'] == self.last_src.get(topic) or now - self.last_out.get(topic, 0.0) < self.period:
+                        continue
+                    due.append((topic, f['stamp'], f['data']))
+            if not due:
+                time.sleep(0.01)
+                if self.demand:
+                    self.event.set()
+                continue
+            if self.backend is None:
+                self._init_backend()
+            outs = None
+            if self.backend == 'gpu':
+                try:
+                    outs = self._gpu([t for t, _, _ in due], [d for _, _, d in due])
+                except Exception as exc:
+                    node.get_logger().warn(f'미리보기 GPU 변환 실패: {exc}', throttle_duration_sec=30.0)
+            if outs is None:
+                outs = [self._cpu(t, d) for t, _, d in due]
+            stamp = _now()
+            for (topic, src_stamp, _), out in zip(due, outs):
+                self.last_src[topic] = src_stamp
+                self.last_out[topic] = stamp
+                if not out:
+                    continue
+                key = topic + self.suffix
+                with node.lock:
+                    node.camera_frames[key] = {'stamp': stamp, 'format': 'jpeg', 'data': out, 'interval': None}
+                cond = node.camera_conditions[key]
+                with cond:
+                    cond.notify_all()
+            self.event.set()
+
+
+def preview_topic_for(topic):
+    """'/<ns>/image_raw/compressed' → '/<ns>/preview/compressed' (gst_camera_node 의 하드웨어 미리보기)."""
+    suffix = '/image_raw/compressed'
+    return topic[:-len(suffix)] + '/preview/compressed' if topic.endswith(suffix) else None
+
+
+def is_preview_topic(topic):
+    return topic.endswith('/preview/compressed')
+
+
 def is_streamable_raw_image_topic(topic):
     lowered = topic.lower()
     return 'result_image' in lowered or lowered.endswith('/avm_cam/image_raw')
@@ -2274,6 +2692,12 @@ def make_handler(node):
             elif parsed.path == '/stream':
                 topic = parse_qs(parsed.query).get('topic', [''])[0]
                 self.serve_mjpeg(topic)
+            elif parsed.path == '/api/road_perception/ipm':
+                self.serve_json(node.road_ipm_state())
+            elif parsed.path == '/api/lens_calibrator':
+                self.serve_json(node.lens_tool_state())
+            elif parsed.path == '/api/calibration_apply':
+                self.serve_json(node.calibration_apply_state())
             elif parsed.path == '/api/gps/track/list':
                 self.serve_json(node.list_gps_tracks())
             elif parsed.path == '/api/gps/track/load':
@@ -2365,9 +2789,43 @@ def make_handler(node):
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             last_stamp = None
+            # 카메라 노드가 하드웨어로 만든 저해상도 미리보기(<ns>/preview/compressed)가 살아 있으면 그것을 보냄
+            # (브라우저 JPEG 디코딩·전송량 약 1/4). ?full=1 이면 항상 원본.
+            full = parse_qs(urlparse(self.path).query).get('full', ['0'])[0] == '1'
+            rect = parse_qs(urlparse(self.path).query).get('rect', ['0'])[0] == '1'
+            rect_tc = None
+            if rect and node.rect_preview is not None and node.rect_preview.handles(topic):
+                rect_tc = node.rect_full if full else node.rect_preview
+            started = _now()
+            preview = None if (full or rect_tc) else preview_topic_for(topic)
+            # 축소 미리보기(모니터가 GPU 로 만듦) — 원본 카메라 JPEG 토픽만
+            transcode = not full and node.preview.handles(topic)
             try:
                 while True:
-                    frame = node.wait_for_frame(topic, last_stamp)
+                    src = topic
+                    if rect_tc is not None:
+                        rect_tc.want(topic)
+                        with node.lock:
+                            pf = node.camera_frames.get(topic + rect_tc.suffix)
+                        if pf and _now() - pf['stamp'] < 2.0:
+                            src = topic + rect_tc.suffix
+                        elif _now() - started < 8.0:
+                            # 범위 편집은 편 영상 기준이므로 준비될 때까지 원본을 섞지 않는다
+                            time.sleep(0.05)
+                            continue
+                    if preview:
+                        with node.lock:
+                            pf = node.camera_frames.get(preview)
+                        if pf and _now() - pf['stamp'] < 2.0:
+                            src = preview
+                    if src == topic and transcode:
+                        node.preview.want(topic)
+                        with node.lock:
+                            pf = node.camera_frames.get(topic + PREVIEW_SUFFIX)
+                        # 미리보기가 아직 없거나 멈췄으면 원본으로 (변환기 실패 대비)
+                        if pf and _now() - pf['stamp'] < 2.0:
+                            src = topic + PREVIEW_SUFFIX
+                    frame = node.wait_for_frame(src, last_stamp)
                     if not frame:
                         time.sleep(0.25)
                         continue
@@ -2423,6 +2881,27 @@ def make_handler(node):
                 except Exception:
                     pass
                 self.serve_json(node.set_bag_dir(path))
+            elif parsed.path == '/api/calibration_apply':
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                except Exception:
+                    self.serve_json({'ok': False, 'error': '요청 형식 오류'})
+                    return
+                self.serve_json(node.calibration_apply_save(body))
+            elif parsed.path == '/api/lens_calibrator/start':
+                self.serve_json(node.lens_tool_start())
+            elif parsed.path == '/api/lens_calibrator/stop':
+                self.serve_json(node.lens_tool_stop())
+            elif parsed.path in ('/api/road_perception/ipm', '/api/road_perception/ipm/reset'):
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                except Exception:
+                    self.serve_json({'ok': False, 'error': '요청 형식 오류'})
+                    return
+                if parsed.path.endswith('/reset'):
+                    self.serve_json(node.road_ipm_reset(str(body.get('camera', ''))))
+                else:
+                    self.serve_json(node.road_ipm_save(body))
             elif parsed.path == '/api/fs/mkdir':
                 path, name = '', ''
                 try:
