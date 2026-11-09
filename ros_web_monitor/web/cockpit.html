@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>자율주행 대시보드</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/cockpit.css">
+</head>
+<body>
+  <header class="top">
+    <strong class="brand">SUM</strong>
+    <h1>Autonomous Driving Monitoring <span>(자율주행 모니터링)</span></h1>
+    <div class="spacer"></div>
+    <time id="clock">--</time>
+    <span id="link" class="pill wait">연결 중</span>
+    <span id="rec" class="rec" hidden>REC</span>
+    <div class="mode-seg" id="viewMode" role="group" aria-label="데이터 보기">
+      <button type="button" data-mode="live" class="on">실시간 뷰</button>
+      <button type="button" data-mode="play">Play 뷰</button>
+    </div>
+    <button id="bagBtn" type="button" class="bag-btn" title="Bag 녹화 시작/저장 (토픽 선택은 기존 화면 설정과 같음)">● Bag</button>
+    <button id="playBtn" type="button" class="play-btn" title="저장된 Bag 재생">▶ Play</button>
+    <button id="rebootBtn" type="button" class="power" title="재부팅 (reboot)">재부팅</button>
+    <button id="shutdownBtn" type="button" class="power danger" title="종료 (shutdown -h now)">종료</button>
+    <button id="full" type="button" title="전체 화면" aria-label="전체 화면">⛶</button>
+    <a class="back" href="/">기존 화면</a>
+  </header>
+
+  <div id="playBar" class="play-bar" hidden>
+    <button id="pbPause" type="button" aria-label="일시정지/재생" title="일시정지/재생" hidden>⏸</button>
+    <button id="pbNext" type="button" aria-label="다음 프레임" title="다음 프레임 (일시정지 중)" hidden>⏭</button>
+    <span id="pbText" class="pb-text"></span>
+    <span id="pbCur" class="pb-time" hidden>0:00</span>
+    <input id="pbSeek" type="range" min="0" max="1" step="0.1" value="0" aria-label="재생 위치" hidden>
+    <span id="pbDur" class="pb-time" hidden>0:00</span>
+    <select id="pbRate" aria-label="배속" title="배속" hidden>
+      <option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option>
+    </select>
+    <button id="pbStop" type="button">■ 중지</button>
+  </div>
+
+  <main class="grid">
+    <aside class="left">
+      <section class="card vehicle">
+        <h2>Vehicle <em id="speedSrc"></em></h2>
+        <div class="gauge">
+          <svg viewBox="0 0 200 112" aria-hidden="true">
+            <defs><linearGradient id="gGrad" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#2fd6a3"/><stop offset=".65" stop-color="#57c7ff"/><stop offset="1" stop-color="#ff7a70"/></linearGradient></defs>
+            <path class="g-track" pathLength="100" d="M 16 104 A 84 84 0 0 1 184 104"/>
+            <path class="g-fill" id="gFill" pathLength="100" d="M 16 104 A 84 84 0 0 1 184 104"/>
+          </svg>
+          <div class="speed"><b id="speed">—</b><span>km/h</span></div>
+        </div>
+        <div class="prnd" id="prnd" role="img" aria-label="기어"><i>P</i><i>R</i><i>N</i><i>D</i></div>
+        <div class="trio">
+          <div><span>Steer</span><b id="steer">—</b></div>
+          <div><span>Brake</span><b id="brake">—</b></div>
+          <div><span>SOC</span><b id="soc">—</b></div>
+        </div>
+      </section>
+      <section class="card">
+        <h2>시스템 상태</h2>
+        <ul id="groups" class="status"></ul>
+      </section>
+      <section class="card">
+        <h2>리소스 <small id="board"></small></h2>
+        <div id="res" class="res"></div>
+      </section>
+    </aside>
+
+    <section class="main-cam">
+      <img id="mainImg" alt="메인 카메라 영상">
+      <div class="cam-label" id="mainLabel"></div>
+      <div class="seg" id="mainSrc">
+        <button type="button" data-src="object">객체</button>
+        <button type="button" data-src="road">도로</button>
+        <button type="button" data-src="raw">영상</button>
+      </div>
+    </section>
+
+    <section class="thumbs" id="thumbs"></section>
+
+    <section class="card lidar">
+      <h2>LiDAR <small id="lidarInfo"></small></h2>
+      <div class="zoom" data-zoom="lidar"><button type="button" data-z="out" aria-label="축소" title="축소">−</button><b>100%</b><button type="button" data-z="in" aria-label="확대" title="확대">+</button><button type="button" data-z="reset" title="원래 크기">맞춤</button></div>
+      <div class="lidar-stage">
+        <canvas id="lidarCv"></canvas>
+        <div class="seg2 lidar-views" id="lidarViews">
+          <button type="button" data-view="top">Top</button>
+          <button type="button" data-view="front">Front</button>
+          <button type="button" data-view="left">Left</button>
+          <button type="button" data-view="right">Right</button>
+        </div>
+        <span class="lidar-hint">드래그 회전 · 휠 클릭 드래그 이동 · 휠 확대</span>
+      </div>
+    </section>
+    <section class="card bev">
+      <h2>3D 주행 <small id="driveCount"></small></h2>
+      <div class="drive-ctl">
+        <div class="seg2" id="drivePresets">
+          <button type="button" data-dpreset="chase">주행</button>
+          <button type="button" data-dpreset="oblique">입체</button>
+          <button type="button" data-dpreset="top">위에서</button>
+        </div>
+        <button type="button" id="driveReset" title="시점 초기화" aria-label="시점 초기화">↺</button>
+      </div>
+      <div class="drive-stage" id="driveView">
+        <canvas id="driveCanvas"></canvas>
+        <span id="driveLaneBadge" class="drive-badge" hidden></span>
+      </div>
+      <!-- 공유 코드가 값을 쓰는 요소. 차량 정보는 왼쪽 카드에 있으므로 숨김 -->
+      <div hidden>
+        <button id="driveSettingsBtn" type="button"></button><button id="vizSettingsBtn" type="button"></button>
+        <span id="driveKicker"></span><span id="driveSource"></span><span id="driveHint"></span>
+        <b id="dsSpeed"></b><b id="dsSteer"></b><b id="dsPedal"></b><b id="dsLead"></b>
+      </div>
+    </section>
+    <section class="card map">
+      <h2>위치</h2>
+      <button type="button" id="mapNow" class="map-now" disabled>현재 위치</button>
+      <div class="map-wrap">
+        <dl id="gps" class="gps"></dl>
+        <div id="map"></div>
+      </div>
+    </section>
+
+    <section class="card topics">
+      <nav class="tabs" id="tabs">
+        <button type="button" data-tab="topics" class="on">주요 토픽 (ROS2)</button>
+        <button type="button" data-tab="log">로그</button>
+      </nav>
+      <ul id="topics" class="tlist"></ul>
+      <ul id="log" class="tlist" hidden></ul>
+    </section>
+    <section class="card chart">
+      <canvas id="chartCv"></canvas>
+    </section>
+    <section class="card counts">
+      <h2>인식 결과 (현재)</h2>
+      <ul id="counts" class="count"></ul>
+    </section>
+  </main>
+
+  <dialog id="playDlg" class="dlg play-dlg">
+    <h3>Bag 재생</h3>
+    <p>저장된 bag을 선택하면 재생을 시작하고 Play 뷰로 전환합니다. 재생 데이터는 <code>/bagplay/...</code>로 분리되어 실시간 데이터와 섞이지 않습니다.</p>
+    <label class="dlg-check"><input id="playLoop" type="checkbox"> 반복 재생</label>
+    <div id="playFiles" class="play-files"></div>
+    <footer>
+      <button id="playDlgStop" type="button" hidden>■ 재생 중지</button>
+      <button id="playDlgClose" type="button">닫기</button>
+    </footer>
+  </dialog>
+  <dialog id="askDlg" class="dlg">
+    <p id="askText" class="ask-text"></p>
+    <form method="dialog"><footer>
+      <button id="askCancel" value="cancel">취소</button>
+      <button id="askOk" value="ok">확인</button>
+    </footer></form>
+  </dialog>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/cockpit.js"></script>
+</body>
+</html>

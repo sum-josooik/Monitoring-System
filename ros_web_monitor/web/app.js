@@ -187,6 +187,12 @@ function isPlayTopic(name) {
   const ns = state.playNamespace || '/bagplay';
   return typeof name === 'string' && name.startsWith(ns + '/');
 }
+// /cluster_boxes 다각형이 들어오는 동안 같은 장애물의 /cluster_detections 박스는 그리지 않음 (cockpit.js 에 같은 정의)
+function isClusterPolygon(m) { return /\/cluster_boxes$/.test(m.topic) && m.type === 4; }
+function clusterBoxShadowed(viz, box) {
+  return /\/cluster_detections$/.test(box.topic)
+    && (viz.markers || []).some((m) => isClusterPolygon(m) && isPlayTopic(m.topic) === isPlayTopic(box.topic));
+}
 // /bagplay/<토픽> → <토픽> (설정에는 실시간 이름으로 저장하고, 쓸 때 effectiveTopic 으로 변환)
 function logicalTopic(name) {
   const ns = state.playNamespace || '/bagplay';
@@ -1646,12 +1652,13 @@ function renderVisualization() {
   // 2) 박스/마커만 깊이 정렬(소수) 후 그림
   const items = [];
   for (const marker of viz.markers || []) {
-    const lyr = topicToLayer[marker.topic];
+    const lyr = topicToLayer[marker.topic]
+      || (isClusterPolygon(marker) && topicToLayer[marker.topic.replace(/cluster_boxes$/, 'cluster_detections')]);
     if (lyr) items.push({ depth: 0, type: 'marker', marker, color: lyr.color });
   }
   for (const box of viz.boxes || []) {
     const lyr = topicToLayer[box.topic];
-    if (!lyr) continue;
+    if (!lyr || clusterBoxShadowed(viz, box)) continue;
     const center = project3D(box.x || 0, box.y || 0, box.z || 0, width, height);
     if (center.visible) items.push({ depth: center.depth, type: 'box', box, color: lyr.color });
   }
@@ -4378,6 +4385,7 @@ renderVizLegend();
 //         차량(/acu_ck2_ver2) 속도·조향·브레이크. 차선 토픽(토픽명에 lane)이 없으면
 //         조향각 기반 예상 경로를 차로로 그린다.
 // camMode: off | auto(전방 1대) | all(전체) | select(cameras 목록), camLayout: strip | surround
+// @cockpit-share-begin (대시보드 cockpit.js 가 이 구간을 그대로 불러 실행함. 구간 밖 전역에 새로 의존하면 cockpit.js 의 대응 정의도 추가)
 const DRIVE_DEFAULTS = {
   tracks: true, clusters: true, radar: true, lidar: false, path: true,
   camMode: 'auto', cameras: [], camLayout: 'strip',
@@ -4513,15 +4521,13 @@ function driveScene() {
   const clusters = [];
   for (const b of viz.boxes || []) {
     if (isPlayTopic(b.topic) !== inPlay) continue;
-    if (b.ns === 'vehicle_rejected') continue;
+    if (b.ns === 'vehicle_rejected' || clusterBoxShadowed(viz, b)) continue;
     if (insideVehicle(b.x || 0, b.y || 0)) continue;   // 차체 안 = 자차 클러스터
     const [f, l] = toVeh(b.x || 0, b.y || 0);
     const o = { ...b, x: f, y: l, z: b.z || 0, yaw: (b.yaw || 0) - vehHeading(), dist: vehEdgeDist(b.x || 0, b.y || 0) };
     if (b.kind === 'track') tracks.push(o);
     else if (b.kind !== 'radar') clusters.push(o);
   }
-  // 트랙과 겹치는 클러스터(트랙의 원본)는 중복 표시하지 않음
-  const clustersOnly = clusters.filter((c) => !tracks.some((t) => Math.hypot(t.x - c.x, t.y - c.y) < 1.6));
   const radar = [];
   const lanes = [];
   for (const m of viz.markers || []) {
@@ -4530,12 +4536,19 @@ function driveScene() {
       lanes.push({ ...m, points: (m.points || []).map((p) => [...toVeh(p[0], p[1]), p[2] || 0]) });
       continue;
     }
+    if (isClusterPolygon(m)) {
+      const o = polygonObstacle(m);
+      if (o) clusters.push(o);
+      continue;
+    }
     if (m.kind !== 'radar' || [4, 5].includes(m.type)) continue;
     for (const p of m.points || []) {
       const [f, l] = toVeh(p[0] || 0, p[1] || 0);
       radar.push({ x: f, y: l, z: p[2] || 0, dist: vehEdgeDist(p[0] || 0, p[1] || 0) });
     }
   }
+  // 트랙과 겹치는 클러스터(트랙의 원본)는 중복 표시하지 않음
+  const clustersOnly = clusters.filter((c) => !tracks.some((t) => Math.hypot(t.x - c.x, t.y - c.y) < 1.6));
   const lidarTopic = effectiveTopic((view.vizLayers.find((l) => l.id === 'l1') || {}).topic || '');
   const lidar = [];
   const hasLidarTopic = (viz.point_layers || []).some((l) => l.topic === lidarTopic);
@@ -4561,6 +4574,19 @@ function driveScene() {
     radar: ds.radar ? radar : [],
     lidar: ds.lidar ? lidar : [],
   };
+}
+
+// /cluster_boxes 닫힌 다각형 → 3D 주행 장면의 장애물 (차량 좌표, 크기는 다각형 외접 범위)
+function polygonObstacle(m) {
+  const verts = (m.points || []).slice(0, -1);   // 마지막 점은 첫 점과 같음
+  if (verts.length < 2) return null;
+  const mean = (i) => verts.reduce((sum, p) => sum + p[i], 0) / verts.length;
+  if (insideVehicle(mean(0), mean(1))) return null;   // 차체 안 = 자차 클러스터
+  const poly = verts.map((p) => toVeh(p[0], p[1]));
+  const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  return { kind: 'detection', topic: m.topic, poly, x: (x0 + x1) / 2, y: (y0 + y1) / 2, z: 0, sx: x1 - x0, sy: y1 - y0, yaw: 0,
+    dist: Math.min(...verts.map((p) => vehEdgeDist(p[0], p[1]))) };
 }
 
 // ── 3D 카메라 ──
@@ -4632,6 +4658,14 @@ function fillPoly3(cam, pts) {
   for (const p of s.slice(1)) driveCtx.lineTo(p.x, p.y);
   driveCtx.closePath();
   return true;
+}
+
+// 바닥에 깔린 다각형 (장애물 윤곽)
+function drawFootprint(cam, poly, fill, stroke) {
+  const pts = poly.map(([x, y]) => [x, y, 0.04]);
+  if (fillPoly3(cam, pts)) { driveCtx.fillStyle = fill; driveCtx.fill(); }
+  driveCtx.strokeStyle = stroke; driveCtx.lineWidth = 1.6;
+  strokePoly3(cam, pts, true);
 }
 
 // 직육면체 (바닥 z0, 길이 L·폭 W·높이 H, yaw) — 보이는 면만 칠함
@@ -4961,6 +4995,11 @@ function renderDrive3D(sc) {
   }
   for (const c of sc.clusters) {
     const isLead = c === sc.lead;
+    if (c.poly) {
+      items.push({ depth: depthOf(c.x, c.y), obj: c, draw: () => drawFootprint(cam, c.poly,
+        isLead ? 'rgba(61,220,151,0.22)' : 'rgba(255,93,108,0.20)', isLead ? DRIVE_COLORS.lead : DRIVE_COLORS.cluster) });
+      continue;
+    }
     items.push({ depth: depthOf(c.x, c.y), obj: c, draw: () => drawSolid(cam, c.x, c.y, Math.max(0, (c.z || 0) - (c.sz || 1) / 2),
       Math.max(0.4, c.sx || 1), Math.max(0.4, c.sy || 1), Math.max(0.4, c.sz || 1), c.yaw || 0,
       { fill: isLead ? 'rgba(61,220,151,0.16)' : 'rgba(255,93,108,0.14)', top: isLead ? 'rgba(61,220,151,0.28)' : 'rgba(255,93,108,0.26)',
@@ -5089,7 +5128,8 @@ function renderRadar2D(sc) {
     const c = Math.cos(yaw), s = Math.sin(yaw);
     const minPx = 7 / scale;
     const hl = Math.max(L, minPx) / 2, hw = Math.max(W, minPx) / 2;
-    const pts = [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]].map(([dx, dy]) => toS(o.x + c * dx - s * dy, o.y + s * dx + c * dy));
+    const pts = o.poly ? o.poly.map(([x, y]) => toS(x, y))
+      : [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]].map(([dx, dy]) => toS(o.x + c * dx - s * dy, o.y + s * dx + c * dy));
     driveCtx.beginPath();
     pts.forEach(([sx, sy], i) => (i ? driveCtx.lineTo(sx, sy) : driveCtx.moveTo(sx, sy)));
     driveCtx.closePath();
@@ -5337,6 +5377,8 @@ driveCanvas.addEventListener('wheel', (e) => {
 setInterval(() => {
   if (view.vizTab !== 'rviz' && driveSettings.camMode !== 'off' && !document.hidden) scheduleViz();
 }, 120);
+
+// @cockpit-share-end
 
 // ── 카메라 확대 보기 ──
 // Camera Preview 카드의 <img>(MJPEG) 프레임을 캔버스에 다시 그림 → 브라우저 연결 추가 없음

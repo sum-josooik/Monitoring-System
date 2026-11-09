@@ -2679,6 +2679,12 @@ def make_handler(node):
                 self.serve_file(STATIC_DIR / 'app.css')
             elif parsed.path == '/app.js':
                 self.serve_file(STATIC_DIR / 'app.js')
+            elif parsed.path == '/cockpit':
+                self.serve_file(STATIC_DIR / 'cockpit.html')
+            elif parsed.path == '/cockpit.js':
+                self.serve_file(STATIC_DIR / 'cockpit.js')
+            elif parsed.path == '/cockpit.css':
+                self.serve_file(STATIC_DIR / 'cockpit.css')
             elif parsed.path == '/api/ui/default-settings':
                 path = default_ui_settings_file()
                 if path is None:
