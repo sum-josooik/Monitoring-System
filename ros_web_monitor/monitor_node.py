@@ -40,8 +40,10 @@ from PIL import Image as PilImage
 
 try:
     from road_perception import rectify as lens_rectify     # 렌즈 보정 (카메라 탭, 차선 범위 편집)
+    from road_perception import lens_calib
 except ImportError:
     lens_rectify = None
+    lens_calib = None
 
 import rclpy
 from rclpy.node import Node
@@ -90,13 +92,13 @@ def ui_settings_dir():
     return None
 
 
-def default_ui_settings_file():
-    # UI/ 폴더의 설정 백업 JSON 중 가장 최신(파일명 타임스탬프 기준)
-    d = ui_settings_dir()
-    if d is None:
-        return None
-    files = sorted(d.glob('*.json'))
-    return files[-1] if files else None
+def default_ui_settings_file(preferred_dir=None):
+    # UI/ 폴더의 설정 백업 JSON 중 가장 최신(파일명 타임스탬프 기준). 백업 저장 폴더를 먼저 본다
+    for d in (Path(preferred_dir) if preferred_dir else None, ui_settings_dir()):
+        files = sorted(d.glob('*.json')) if d is not None and d.is_dir() else []
+        if files:
+            return files[-1]
+    return None
 
 # ── ROS1 bag → ROS2 bag 변환용 격리 venv ──
 # 시스템 파이썬(externally-managed-environment)을 건드리지 않도록 사용자 홈 아래
@@ -597,6 +599,7 @@ class MonitorNode(Node):
         self.lens_proc = None
         self.lens_lock = threading.Lock()
         self.declare_parameter('road_ipm_dir', '~/captin5_ws/src/road_perception/config/ipm')
+        self.declare_parameter('ui_settings_dir', '~/captin5_ws/src/ros_web_monitor/UI')   # 설정 백업을 저장·불러오는 폴더
         self.declare_parameter('road_cameras_config', '')   # 비우면 road_perception 패키지의 config/cameras.yaml
         self.declare_parameter('preview_width', 960)
         self.declare_parameter('preview_fps', 12.0)
@@ -1888,6 +1891,198 @@ class MonitorNode(Node):
             return {'ok': False, 'error': f'삭제 실패: {exc}'}
         return self.road_ipm_state()
 
+    # ── 설정 백업: 브라우저가 아니라 서버 파일에 저장되는 값 ──
+    @staticmethod
+    def _read_text(path):
+        try:
+            with open(path, encoding='utf-8') as f:
+                return f.read()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _write_text(path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+
+    def backup_folder(self):
+        return os.path.expanduser(str(self.get_parameter('ui_settings_dir').value))
+
+    def ui_backup_save(self, body):
+        if not isinstance(body, dict) or not isinstance(body.get('settings'), dict):
+            return {'ok': False, 'error': '잘못된 형식'}
+        folder = self.backup_folder()
+        name = time.strftime('ros_web_monitor_settings_%Y-%m-%d-%H-%M-%S.json')
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            return {'ok': False, 'error': '같은 이름의 파일이 있습니다. 잠시 후 다시 시도하세요'}
+        try:
+            self._write_text(path, json.dumps(body, indent=2, ensure_ascii=False))
+        except OSError as exc:
+            return {'ok': False, 'error': f'저장 실패: {exc}'}
+        return {'ok': True, 'name': name, 'path': path}
+
+    def ui_backup_list(self):
+        folder = self.backup_folder()
+        items = []
+        for path in sorted(glob.glob(os.path.join(folder, '*.json')), reverse=True):
+            try:
+                with open(path, encoding='utf-8') as f:
+                    doc = json.load(f)
+                stat = os.stat(path)
+            except (OSError, ValueError):
+                continue
+            settings = doc.get('settings', doc) if isinstance(doc, dict) else None
+            if not isinstance(settings, dict):
+                continue
+            items.append({'name': os.path.basename(path), 'size_kb': round(stat.st_size / 1024, 1),
+                          'modified': time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime)),
+                          'items': len(settings), 'server': isinstance(doc.get('server'), dict)})
+        return {'ok': True, 'folder': folder, 'files': items}
+
+    def ui_backup_path(self, name):
+        """이름 검증 후 백업 폴더 안의 파일 경로. 없거나 잘못되면 None."""
+        if not re.fullmatch(r'[\w][\w.-]*\.json', name or ''):
+            return None
+        path = os.path.join(self.backup_folder(), name)
+        return path if os.path.isfile(path) else None
+
+    def settings_backup(self):
+        out = {'ok': True, 'bag_dir': self.bag_dir}
+        if self.lens_store is None or lens_calib is None:
+            return out
+        out['calibration_apply'] = lens_rectify.read_settings(self.calibration_apply_file)
+        directory = self.lens_store.dir
+        out['intrinsics'] = {c: self._read_text(lens_calib.active_path(directory, c)) for c in lens_rectify.CAMERAS}
+        library = {}
+        for camera in lens_rectify.CAMERAS:
+            paths = sorted(glob.glob(os.path.join(directory, 'library', camera, '*.yaml')))
+            items = {os.path.basename(p)[:-5]: self._read_text(p) for p in paths}
+            if items:
+                library[camera] = items
+        out['intrinsics_library'] = library
+        try:
+            _, cams = self._road_config()
+            out['road_ipm'] = {c: self._read_text(self._road_ipm_path(c)) for c in cams}
+        except Exception as exc:
+            self.get_logger().warn(f'차선 범위를 백업하지 못함: {exc}')
+        return out
+
+    @staticmethod
+    def _parse_yaml_doc(text, required, label):
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ValueError(f'{label}: YAML 오류') from exc
+        missing = [k for k in required if not isinstance(doc, dict) or k not in doc]
+        if missing:
+            raise ValueError(f'{label}: 항목 없음 ({", ".join(missing)})')
+
+    def settings_restore(self, body):
+        """백업의 server 부분을 복원. 전부 검사한 뒤에 쓴다. 보관 폴더(library)는 없는 이름만 추가."""
+        if not isinstance(body, dict):
+            return {'ok': False, 'error': '잘못된 형식'}
+        result = {'ok': True, 'skipped': [], 'warnings': [], 'auto_backups': [],
+                  'road_ipm': 0, 'intrinsics': 0, 'library_added': 0, 'calibration_apply': False}
+        writes, removes, library, active_cameras = [], [], [], []
+        has_files = any(k in body for k in ('calibration_apply', 'intrinsics', 'intrinsics_library', 'road_ipm'))
+        if has_files and (self.lens_store is None or lens_calib is None):
+            return {'ok': False, 'error': 'road_perception 패키지를 찾지 못했습니다'}
+
+        def changes(path, text):
+            return self._read_text(path) != text
+
+        try:
+            apply_values = body.get('calibration_apply')
+            if apply_values is not None and not (isinstance(apply_values, dict)
+                                                 and all(isinstance(v, bool) for v in apply_values.values())):
+                raise ValueError('탭별 보정 적용 값이 잘못됨')
+            for section in ('intrinsics', 'road_ipm', 'intrinsics_library'):
+                if not isinstance(body.get(section, {}), dict):
+                    raise ValueError(f'{section} 형식이 잘못됨')
+
+            for camera, text in body.get('intrinsics', {}).items():
+                if camera not in lens_rectify.CAMERAS:
+                    result['skipped'].append(camera)
+                    continue
+                path = lens_calib.active_path(self.lens_store.dir, camera)
+                if text is None:
+                    if os.path.isfile(path):
+                        active_cameras.append(camera)
+                        removes.append(path)
+                        result['intrinsics'] += 1
+                    continue
+                if not isinstance(text, str):
+                    raise ValueError(f'{camera}: 보정값 형식이 잘못됨')
+                self._parse_yaml_doc(text, lens_calib.LIBRARY_KEYS, camera)
+                if changes(path, text):
+                    active_cameras.append(camera)
+                    writes.append((path, text))
+                    result['intrinsics'] += 1
+
+            for camera, items in body.get('intrinsics_library', {}).items():
+                if camera not in lens_rectify.CAMERAS:
+                    result['skipped'].append(camera)
+                    continue
+                if not isinstance(items, dict):
+                    raise ValueError(f'{camera}: 보관 폴더 형식이 잘못됨')
+                for name, text in items.items():
+                    if not lens_calib.NAME_RE.match(str(name)) or not isinstance(text, str):
+                        raise ValueError(f'{camera}: 보관 이름이 잘못됨')
+                    self._parse_yaml_doc(text, lens_calib.LIBRARY_KEYS, f'{camera}/{name}')
+                    path = lens_calib.library_path(self.lens_store.dir, camera, name)
+                    if not os.path.exists(path):
+                        library.append((path, text))
+
+            if 'road_ipm' in body:
+                _, cams = self._road_config()
+                for camera, text in body['road_ipm'].items():
+                    if camera not in cams:
+                        result['skipped'].append(camera)
+                        continue
+                    path = self._road_ipm_path(camera)
+                    if text is None:
+                        if os.path.isfile(path):
+                            removes.append(path)
+                            result['road_ipm'] += 1
+                        continue
+                    if not isinstance(text, str):
+                        raise ValueError(f'{camera}: 차선 범위 형식이 잘못됨')
+                    self._parse_yaml_doc(text, ('src', 'dst', 'x_range', 'y_range'), f'{camera} 차선 범위')
+                    if changes(path, text):
+                        writes.append((path, text))
+                        result['road_ipm'] += 1
+        except Exception as exc:
+            return {'ok': False, 'error': f'백업 내용 오류, 아무것도 바꾸지 않았습니다. {exc}'}
+
+        try:
+            for camera in active_cameras:   # 덮어쓰기 전에 현재 보정값을 보관 폴더에 남긴다
+                saved = lens_calib.backup_active(self.lens_store.dir, camera)
+                if saved:
+                    result['auto_backups'].append(f'{camera}/{saved}')
+            for path, text in writes + library:
+                self._write_text(path, text)
+            for path in removes:
+                os.remove(path)
+            result['library_added'] = len(library)
+            if apply_values is not None:
+                lens_rectify.write_settings(apply_values, self.calibration_apply_file)
+                result['calibration_apply'] = True
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return {'ok': False, 'error': f'복원 중 실패, 일부만 복원됐을 수 있습니다. {exc}'}
+
+        if isinstance(body.get('bag_dir'), str) and body['bag_dir'] != self.bag_dir:
+            bag = self.set_bag_dir(body['bag_dir'])
+            if bag.get('ok'):
+                result['bag_dir'] = bag['dir']
+            else:
+                result['warnings'].append(f"Bag 저장 경로: {bag.get('error')}")
+        return result
+
     # ── 렌즈 보정 도구 (설정 탭을 여는 동안만 별도 프로세스로 실행) ──
     def _lens_port_open(self):
         try:
@@ -2381,6 +2576,7 @@ def parse_image_header(data):
 
 
 PREVIEW_SUFFIX = '@preview'
+SERVER_RESTORE_MAX_BYTES = 16 * 1024 * 1024
 RECT_SUFFIX = '@rect'
 RECT_FULL_SUFFIX = '@rectfull'
 
@@ -2686,7 +2882,7 @@ def make_handler(node):
             elif parsed.path == '/cockpit.css':
                 self.serve_file(STATIC_DIR / 'cockpit.css')
             elif parsed.path == '/api/ui/default-settings':
-                path = default_ui_settings_file()
+                path = default_ui_settings_file(node.backup_folder())
                 if path is None:
                     self.send_error(HTTPStatus.NOT_FOUND, 'No UI settings file')
                 else:
@@ -2702,6 +2898,16 @@ def make_handler(node):
                 self.serve_json(node.road_ipm_state())
             elif parsed.path == '/api/lens_calibrator':
                 self.serve_json(node.lens_tool_state())
+            elif parsed.path == '/api/settings/server-backup':
+                self.serve_json(node.settings_backup())
+            elif parsed.path == '/api/settings/ui-list':
+                self.serve_json(node.ui_backup_list())
+            elif parsed.path == '/api/settings/ui-file':
+                path = node.ui_backup_path(parse_qs(parsed.query).get('name', [''])[0])
+                if path is None:
+                    self.send_error(HTTPStatus.NOT_FOUND, 'No such backup file')
+                else:
+                    self.serve_file(Path(path))
             elif parsed.path == '/api/calibration_apply':
                 self.serve_json(node.calibration_apply_state())
             elif parsed.path == '/api/gps/track/list':
@@ -2894,6 +3100,28 @@ def make_handler(node):
                     self.serve_json({'ok': False, 'error': '요청 형식 오류'})
                     return
                 self.serve_json(node.calibration_apply_save(body))
+            elif parsed.path == '/api/settings/ui-save':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    if length > SERVER_RESTORE_MAX_BYTES:
+                        self.serve_json({'ok': False, 'error': '설정이 너무 큽니다'})
+                        return
+                    body = json.loads(self.rfile.read(length) or b'{}')
+                except Exception:
+                    self.serve_json({'ok': False, 'error': '요청 형식 오류'})
+                    return
+                self.serve_json(node.ui_backup_save(body))
+            elif parsed.path == '/api/settings/server-restore':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    if length > SERVER_RESTORE_MAX_BYTES:
+                        self.serve_json({'ok': False, 'error': '백업 파일이 너무 큽니다'})
+                        return
+                    body = json.loads(self.rfile.read(length) or b'{}')
+                except Exception:
+                    self.serve_json({'ok': False, 'error': '요청 형식 오류'})
+                    return
+                self.serve_json(node.settings_restore(body))
             elif parsed.path == '/api/lens_calibrator/start':
                 self.serve_json(node.lens_tool_start())
             elif parsed.path == '/api/lens_calibrator/stop':

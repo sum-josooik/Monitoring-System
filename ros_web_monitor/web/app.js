@@ -4307,48 +4307,90 @@ async function restoreDefault() {
     vdNotice('기본값 복원 실패: ' + e.message);
   }
 }
-function exportSettings() {
+async function exportSettings() {
   const data = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
     if (k && k.startsWith('rosWeb')) data[k] = localStorage.getItem(k);
   }
-  const payload = { _meta: { app: 'ros_web_monitor', version: 1, ts: new Date().toISOString() }, settings: data };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  a.href = url; a.download = `ros_web_monitor_settings_${stamp}.json`;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  let server = null;
+  try {
+    const j = await (await fetch('/api/settings/server-backup', { cache: 'no-store' })).json();
+    if (j.ok) { delete j.ok; server = j; }
+  } catch (_) { /* 아래에서 안내 */ }
+  const payload = { _meta: { app: 'ros_web_monitor', version: 2, ts: new Date().toISOString() }, settings: data };
+  if (server) payload.server = server;
+  try {
+    const res = await fetch('/api/settings/ui-save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error || '저장 실패');
+    vdNotice(`설정을 UI 폴더에 저장했습니다.\n${j.path}${server ? '' : '\n\n서버에 저장된 값은 읽지 못해 화면 설정만 저장했습니다.'}`);
+  } catch (e) {
+    vdNotice(`설정 저장 실패: ${e.message}\n모니터를 최신 빌드로 다시 시작했는지 확인하세요.`);
+  }
 }
-function importSettings(file) {
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const obj = JSON.parse(reader.result);
-      const settings = obj && obj.settings && typeof obj.settings === 'object' ? obj.settings : obj;
-      if (!settings || typeof settings !== 'object') throw new Error('형식이 올바르지 않습니다');
-      let n = 0;
-      Object.keys(settings).forEach((k) => {
-        if (k.startsWith('rosWeb') && typeof settings[k] === 'string') { localStorage.setItem(k, settings[k]); n += 1; }
-      });
-      if (!n) throw new Error('복원할 rosWeb 설정 항목이 없습니다');
-      alert(`설정 ${n}개를 복원했습니다. 적용을 위해 새로고침합니다.`);
-      location.reload();
-    } catch (e) {
-      alert('백업 불러오기 실패: ' + e.message);
-    }
-  };
-  reader.readAsText(file);
+// 백업의 server 부분(보정값, 차선 범위 등) 복원. 반환: 사용자에게 보여줄 결과 문장
+async function restoreServerSettings(server) {
+  const ok = await vdConfirm('이 백업에는 서버에 저장된 값이 들어 있습니다.\n탭별 보정 적용, 카메라 보정값, 차선 인식 범위, Bag 저장 경로를 백업 내용으로 바꿉니다. 바뀌는 보정값은 보관 폴더에 자동으로 남깁니다.\n\n[취소]를 누르면 화면 설정만 복원합니다.');
+  if (!ok) return '서버에 저장된 값은 복원하지 않았습니다.';
+  const res = await fetch('/api/settings/server-restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(server),
+  });
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || '서버 복원 실패');
+  const lines = [`서버 복원: 카메라 보정값 ${j.intrinsics}대, 차선 범위 ${j.road_ipm}대, 보관 폴더 ${j.library_added}개 추가`];
+  if (j.intrinsics) lines.push('영상 처리에는 자동 반영됩니다. camera_info 토픽은 카메라 보정 탭의 [적용하기]로 반영하세요.');
+  if ((j.skipped || []).length) lines.push(`이 차량에 없어 건너뜀: ${j.skipped.join(', ')}`);
+  (j.warnings || []).forEach((w) => lines.push(w));
+  return lines.join('\n');
+}
+async function applyBackup(obj) {
+  const settings = obj && obj.settings && typeof obj.settings === 'object' ? obj.settings : obj;
+  if (!settings || typeof settings !== 'object') throw new Error('형식이 올바르지 않습니다');
+  const keys = Object.keys(settings).filter((k) => k.startsWith('rosWeb') && typeof settings[k] === 'string');
+  if (!keys.length) throw new Error('복원할 rosWeb 설정 항목이 없습니다');
+  const serverNote = obj.server && typeof obj.server === 'object' ? await restoreServerSettings(obj.server) : '';
+  keys.forEach((k) => localStorage.setItem(k, settings[k]));
+  alert(`화면 설정 ${keys.length}개를 복원했습니다.${serverNote ? `\n${serverNote}` : ''}\n적용을 위해 새로고침합니다.`);
+  location.reload();
+}
+// UI 폴더의 백업 목록에서 골라 복원
+async function openUiBackupList() {
+  const ov = document.createElement('div');
+  ov.className = 'vd-dialog-overlay';
+  ov.innerHTML = `<div class="vd-dialog ui-backup-dialog">
+    <div class="vd-dialog-msg">UI 폴더에서 불러올 백업을 선택하세요.<div class="ui-backup-folder"></div></div>
+    <div class="play-file-list ui-backup-list"><div class="bag-empty">불러오는 중…</div></div>
+    <div class="vd-dialog-btns"><button type="button" class="vd-dialog-cancel">닫기</button></div></div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('.vd-dialog-cancel').addEventListener('click', close);
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  const list = ov.querySelector('.ui-backup-list');
+  const empty = (text) => { list.innerHTML = `<div class="bag-empty">${escapeHtml(text)}</div>`; };
+  try {
+    const j = await (await fetch('/api/settings/ui-list', { cache: 'no-store' })).json();
+    if (!j.ok) throw new Error(j.error || '목록 조회 실패');
+    ov.querySelector('.ui-backup-folder').textContent = j.folder;
+    if (!j.files.length) { empty('저장된 백업이 없습니다'); return; }
+    list.innerHTML = j.files.map((f) => `<button type="button" class="play-file-item" data-name="${escapeHtml(f.name)}">
+      <span class="bag-tname play-file-name">${escapeHtml(f.name)}</span>
+      <span class="play-file-meta">${f.server ? '화면+서버' : '화면만'} · ${f.size_kb} KB · ${escapeHtml(f.modified)}</span>
+    </button>`).join('');
+    list.querySelectorAll('.play-file-item').forEach((b) => b.addEventListener('click', async () => {
+      close();
+      try {
+        const res = await fetch(`/api/settings/ui-file?name=${encodeURIComponent(b.dataset.name)}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error('파일을 찾을 수 없습니다');
+        await applyBackup(await res.json());
+      } catch (e) { vdNotice(`백업 불러오기 실패: ${e.message}`); }
+    }));
+  } catch (e) { empty(`목록 조회 실패: ${e.message}`); }
 }
 $('#backupExport').addEventListener('click', exportSettings);
-$('#backupImportBtn').addEventListener('click', () => $('#backupImportFile').click());
-$('#backupImportFile').addEventListener('change', (e) => {
-  const f = e.target.files && e.target.files[0];
-  if (f) importSettings(f);
-  e.target.value = '';
-});
+$('#backupImportBtn').addEventListener('click', openUiBackupList);
 $('#backupSaveDefault').addEventListener('click', saveCurrentAsDefault);
 $('#backupRestoreDefault').addEventListener('click', restoreDefault);
 

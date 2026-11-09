@@ -419,11 +419,11 @@ ros2 launch ros_web_monitor monitor.launch.py host:=0.0.0.0 port:=8080
 
 - 브라우저에 저장된 설정이 없으면 페이지를 열 때 `UI/*.json` 중 **가장 최신 파일**(파일명 순)을 자동으로 적용합니다.
 - ⚙ 설정 → **백업** 탭
-  - **⬇ 설정 백업 다운로드**: 현재 설정을 JSON으로 저장
-  - **⬆ 백업 불러오기**: JSON 파일로 복원
-  - **📄 UI 폴더 설정 파일 불러오기**: `UI/`의 최신 파일로 강제 교체
+  - **⬇ UI 폴더에 설정 백업 저장**: 화면 설정(대시보드 포함)과 서버에 저장된 값(Bag 저장 경로, 탭별 보정 적용, 카메라 보정값과 보관 폴더, 차선 인식 범위)을 보드의 `~/captin5_ws/src/ros_web_monitor/UI`에 JSON으로 저장(파라미터 `ui_settings_dir`)
+  - **⬆ UI 폴더에서 백업 불러오기**: 폴더의 백업 목록에서 골라 복원. 서버에 저장된 값은 확인 창에서 복원 여부를 고릅니다. 바뀌는 보정값은 보관 폴더에 `auto_<시각>`으로 남고, 보관 폴더의 기존 항목은 지우지 않습니다. `camera_info` 토픽은 카메라 보정 탭의 **적용하기**로 반영합니다
+  - **📄 UI 폴더 최신 화면 설정으로 교체**: `UI/`의 최신 파일로 화면 설정을 강제 교체
 
-팀 공통 기본 화면을 바꾸려면 백업 탭에서 설정을 다운로드해 `UI/`에 넣고 다시 빌드합니다(`colcon build --packages-select ros_web_monitor`).
+백업 탭에서 저장한 파일은 바로 `UI/`의 최신 파일이 되므로, 브라우저 설정이 없는 접속자에게 이 화면 설정이 자동 적용됩니다.
 
 ## 재부팅 / 종료 버튼 설정
 
@@ -446,6 +446,8 @@ echo "$USER ALL=(root) NOPASSWD: /usr/sbin/shutdown, /usr/sbin/reboot" \
 | GET | `/api/road_perception/ipm` | 카메라별 차선 인식 범위 (`rect`: 꼭짓점이 편 영상 기준인지) |
 | GET | `/api/calibration_apply` | 탭별 보정 적용 설정, 카메라별 보정값 유무 |
 | GET | `/api/lens_calibrator` | 보정 도구 실행 상태 |
+| GET | `/api/settings/server-backup` | 백업에 넣을 서버 저장 값 |
+| GET | `/api/settings/ui-list`, `/api/settings/ui-file?name=` | UI 폴더의 백업 목록, 파일 내용 |
 | GET | `/api/ui/default-settings` | `UI/` 폴더의 최신 화면 설정 JSON |
 | GET | `/api/bag/play/list` | 재생 가능한 bag 목록 |
 | GET | `/api/bag/play/track` | 재생 중인 bag 의 GPS 경로 (`status`: loading / ready / none) |
@@ -459,6 +461,8 @@ echo "$USER ALL=(root) NOPASSWD: /usr/sbin/shutdown, /usr/sbin/reboot" \
 | POST | `/api/road_perception/ipm`, `/api/road_perception/ipm/reset` | 차선 인식 범위 저장 / 기본값으로 되돌리기 |
 | POST | `/api/calibration_apply` | 탭별 보정 적용 설정 저장 (`camera`, `perception`, `road`) |
 | POST | `/api/lens_calibrator/{start,stop}` | 보정 도구 켜기 / 끄기 |
+| POST | `/api/settings/ui-save` | 설정 백업을 UI 폴더에 저장 |
+| POST | `/api/settings/server-restore` | 백업의 서버 저장 값 복원 |
 | POST | `/api/system/reboot`, `/api/system/shutdown` | 보드 전원 제어 |
 
 ## 디렉터리 구조

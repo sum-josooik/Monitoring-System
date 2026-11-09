@@ -434,18 +434,17 @@
           </div>
 
           <div id="setPanelBackup" class="set-panel" hidden>
-            <p class="set-hint">현재 모든 설정(레이아웃·헤더·Bag·RViz·카메라·Vehicle 카드)을 JSON 파일로 저장하거나 불러옵니다.</p>
+            <p class="set-hint">화면 설정(레이아웃·헤더·Bag·RViz·주행 뷰·카메라·Vehicle 카드·대시보드)과 서버에 저장된 값(Bag 저장 경로, 탭별 보정 적용, 카메라 보정값과 보관 폴더, 차선 인식 범위)을 JSON 파일로 저장하거나 불러옵니다. 파일 위치: <code>~/captin5_ws/src/ros_web_monitor/UI</code></p>
             <div class="backup-actions">
-              <button id="backupExport" type="button" class="backup-btn">⬇ 설정 백업 다운로드</button>
-              <button id="backupImportBtn" type="button" class="backup-btn">⬆ 백업 불러오기</button>
-              <input id="backupImportFile" type="file" accept="application/json,.json" hidden>
+              <button id="backupExport" type="button" class="backup-btn">⬇ UI 폴더에 설정 백업 저장</button>
+              <button id="backupImportBtn" type="button" class="backup-btn">⬆ UI 폴더에서 백업 불러오기</button>
             </div>
             <div class="backup-divider"></div>
-            <p class="set-hint">현재 화면 구성을 "기본값"으로 저장해두면, 언제든 한 번에 되돌릴 수 있습니다.</p>
+            <p class="set-hint">현재 화면 구성을 "기본값"으로 저장해두면, 언제든 한 번에 되돌릴 수 있습니다. 기본값과 UI 폴더 설정은 화면 설정만 다루며, 서버에 저장된 값은 바꾸지 않습니다.</p>
             <div class="backup-actions">
               <button id="backupSaveDefault" type="button" class="backup-btn">★ 현재 설정을 기본값으로 저장</button>
               <button id="backupRestoreDefault" type="button" class="backup-btn">↺ 기본값으로 되돌리기</button>
-              <button id="backupLoadUiFile" type="button" class="backup-btn">📄 UI 폴더 설정 파일 불러오기</button>
+              <button id="backupLoadUiFile" type="button" class="backup-btn">📄 UI 폴더 최신 화면 설정으로 교체</button>
             </div>
             <div id="backupInfo" class="backup-info"></div>
           </div>
