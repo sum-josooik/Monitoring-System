@@ -14,7 +14,7 @@ const STALE_SEC = 3;
 const lidarDefault = () => ({ yaw: -({ '+x': 0, '+y': Math.PI / 2, '-x': Math.PI, '-y': -Math.PI / 2 }[GEOM.forward] ?? Math.PI / 2), pitch: LIDAR_PITCH_DEFAULT, zoom: LIDAR_ZOOM_DEFAULT, panX: 0, panY: 0 });
 const SRC_NAMES = { object: '객체 인지', road: '도로 인지', raw: '카메라 영상' };
 const GEOM = (() => {
-  const d = { forward: '+y', cx: 0.2, cy: 1.6, length: 8.2, width: 3.0, height: 2.6 };
+  const d = { forward: '+y', cx: 0.2, cy: 1.6, length: 8.2, width: 3.0, height: 2.6, radarFrontX: 0, radarRearX: 0 };
   try { return { ...d, ...(JSON.parse(localStorage.getItem('rosWebVehicleGeom') || 'null') || {}) }; } catch (_) { return d; }
 })();
 const ui = (() => {
@@ -247,7 +247,7 @@ function renderTopics(s) {
 }
 function renderCounts(s) {
   const v = s.visualization || {}, boxes = (v.boxes || []).filter((b) => inMode(b.topic));
-  const radar = (v.markers || []).filter((m) => m.kind === 'radar' && inMode(m.topic)).reduce((n, m) => n + (m.points || []).length, 0);
+  const radar = (v.radar || []).filter((r) => inMode(r.topic)).reduce((n, r) => n + (r.objects || []).length, 0);
   const rows = [['차량 트랙', boxes.filter((b) => b.kind === 'track').length, '#3ddc84'], ['장애물 (클러스터)', boxes.filter((b) => b.kind === 'detection').length, '#ff7a70'], ['레이더 점', radar, '#b48cff']];
   $('counts').replaceChildren(...rows.map(([n, c, color]) => {
     const el = document.createElement('li');

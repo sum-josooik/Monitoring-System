@@ -120,7 +120,8 @@ const view = {
 // ── 차량 기하 (데이터 좌표계 = multi_lidar_merge output_frame) ──
 // 이 차량은 전방이 +y, 좌측이 -x (Front_Top Ouster y≈+3.6~4.9, Rear_Top y=-2.3).
 // 기본 차체 = remove_vehicle CropBox (x -1.3~1.7, y -2.5~5.7). 설정 → RViz → '차량 위치'에서 변경.
-const VEHICLE_DEFAULTS = { forward: '+y', cx: 0.2, cy: 1.6, length: 8.2, width: 3.0, height: 2.6 };
+// radarFrontX / radarRearX: 레이더 원점의 범퍼 중앙 기준 전후 위치(m, +전방)
+const VEHICLE_DEFAULTS = { forward: '+y', cx: 0.2, cy: 1.6, length: 8.2, width: 3.0, height: 2.6, radarFrontX: 0, radarRearX: 0 };
 const vehicleGeom = (() => {
   try { return { ...VEHICLE_DEFAULTS, ...(JSON.parse(localStorage.getItem('rosWebVehicleGeom') || 'null') || {}) }; }
   catch (_) { return { ...VEHICLE_DEFAULTS }; }
@@ -136,6 +137,11 @@ function toVeh(x, y) {
 function vehEdgeDist(x, y) {
   const [f, l] = toVeh(x, y);
   return Math.hypot(Math.max(0, Math.abs(f) - vehicleGeom.length / 2), Math.max(0, Math.abs(l) - vehicleGeom.width / 2));
+}
+// 차량 중심 기준 [전방, 좌측] → 데이터 좌표 (x, y) (toVeh 의 역변환)
+function fromVeh(f, l) {
+  const h = vehHeading(), c = Math.cos(h), sn = Math.sin(h);
+  return [vehicleGeom.cx + c * f - sn * l, vehicleGeom.cy + sn * f + c * l];
 }
 function insideVehicle(x, y) {
   const [f, l] = toVeh(x, y);
@@ -308,11 +314,14 @@ function scheduleViz() {
   requestAnimationFrame(() => { vizRafPending = false; renderVisualization(); });
 }
 
+let legendHasRadar = false;   // 레이더 데이터가 생기거나 끊기면 범례(기본 Radar 레이어 표시)를 다시 그림
 function render(payload) {
   state.topics = payload.topics || [];
   state.groups = payload.groups || [];
   state.cameras = payload.cameras || [];
   state.visualization = payload.visualization || { range_m: 70, point_layers: [], boxes: [], markers: [] };
+  const hasRadar = (state.visualization.radar || []).length > 0;
+  if (hasRadar !== legendHasRadar) { legendHasRadar = hasRadar; renderVizLegend(); }
   state.system = payload.system || {};
   state.gps = payload.gps || null;
   state.gpsTrack = payload.gps_track || null;
@@ -1557,6 +1566,11 @@ function closeSettingsModal(save) {
 // 점 색상 모드(view.vizColorMode): layer(레이어 색) | height(높이 색상맵) | range(거리 색상맵)
 const VIZ_COLORMAP = ['#3b4cc0', '#2c7bd6', '#17b2e0', '#2fd3b4', '#7fe36a', '#d6e04a', '#fbb13c', '#f36b3b', '#d93a5b'];
 const VIZ_BINS = 24;
+function radarSideOf(topic) {
+  const t = String(topic).toLowerCase();
+  return t.includes('rear') ? 'rear' : t.includes('front') ? 'front' : null;
+}
+const RADAR_LAYER_ID = 'l2';   // 기본 'Radar' 레이어 — 토픽을 비워 두면 전방·후방 레이더를 모두 그림
 const VIZ_KIND_COLOR = { track: '#3ddc97', object: '#ff5d6c', detection: '#ff5d6c', radar: '#ffc04d', marker: '#c084fc' };
 view.vizColorMode = localStorage.getItem('rosWebVizColorMode') || 'height';
 view.vizLabels = localStorage.getItem('rosWebVizLabels') !== 'off';
@@ -1651,10 +1665,29 @@ function renderVisualization() {
 
   // 2) 박스/마커만 깊이 정렬(소수) 후 그림
   const items = [];
+  const hasRadarData = (viz.radar || []).length > 0;
   for (const marker of viz.markers || []) {
+    // 레이더 마커(/radar_markers/*)는 RViz 용으로 축을 뒤집은 좌표라, RadarMsg 가 있으면 아래에서 원값으로 그림
+    if (marker.kind === 'radar' && hasRadarData) continue;
     const lyr = topicToLayer[marker.topic]
       || (isClusterPolygon(marker) && topicToLayer[marker.topic.replace(/cluster_boxes$/, 'cluster_detections')]);
     if (lyr) items.push({ depth: 0, type: 'marker', marker, color: lyr.color });
+  }
+  // 레이더: RadarMsg 원값을 차량 설정의 장착 위치로 변환. 토픽을 고른 레이어가 있으면 그 색,
+  // 없으면 기본 'Radar' 레이어(토픽 비움 = 전방·후방 레이더 모두)로 그림
+  const radarLyr = view.vizLayers.find((l) => l.id === RADAR_LAYER_ID);
+  for (const r of viz.radar || []) {
+    if (isPlayTopic(r.topic) !== (view.mode === 'play')) continue;
+    // 레이어 토픽이 RadarMsg 자체이거나, 같은 방향의 레이더 토픽(/radar_markers/front 등)이면 그 레이어로
+    const lyr = topicToLayer[r.topic]
+      || Object.values(topicToLayer).find((l) => /radar/i.test(l.topic) && radarSideOf(l.topic) === r.side)
+      || (radarLyr && radarLyr.visible && !radarLyr.topic ? radarLyr : null);
+    if (!lyr) continue;
+    const points = (r.objects || []).map((o) => {
+      const [x, y] = fromVeh(...radarToVeh(r.side, o[0], o[1]));
+      return [x, y, 0.5, Math.hypot(o[0], o[1])];
+    });
+    items.push({ depth: 0, type: 'marker', marker: { topic: r.topic, type: 8, kind: 'radar', points }, color: lyr.color });
   }
   for (const box of viz.boxes || []) {
     const lyr = topicToLayer[box.topic];
@@ -1837,7 +1870,7 @@ function draw3DMarker(marker, color, width, height) {
     vizCtx.globalAlpha = 1;
     vizCtx.beginPath(); vizCtx.arc(p.x, p.y, r, 0, Math.PI * 2); vizCtx.fill();
     if (showDist) {
-      const d = Math.hypot(point[0], point[1]);
+      const d = point[3] ?? Math.hypot(point[0], point[1]);   // [3] = 레이더 측정 거리
       vizCtx.font = '600 10px "Pretendard Variable", Pretendard, system-ui, sans-serif';
       const text = `${d.toFixed(0)}m`;
       vizCtx.lineWidth = 3;
@@ -2005,6 +2038,7 @@ const VIZ_TOPIC_TYPES = new Set([
   'visualization_msgs/msg/MarkerArray',
   'visualization_msgs/msg/Marker',
   'vision_msgs/msg/Detection3DArray',
+  'can_parser_msgs/msg/RadarMsg',
 ]);
 
 let vsmEdit = null;
@@ -2022,6 +2056,7 @@ function collectVizTopics() {
   for (const l of (state.visualization.point_layers || [])) { if (!isPlayTopic(l.topic)) all.add(l.topic); }
   for (const b of (state.visualization.boxes || [])) { if (!isPlayTopic(b.topic)) all.add(b.topic); }
   for (const m of (state.visualization.markers || [])) { if (!isPlayTopic(m.topic)) all.add(m.topic); }
+  for (const r of (state.visualization.radar || [])) { if (!isPlayTopic(r.topic)) all.add(r.topic); }
   return [...all].sort();
 }
 
@@ -2076,7 +2111,8 @@ function renderVsmLayerConfig() {
 function renderVizLegend() {
   const legend = document.querySelector('.viz-legend');
   if (!legend) return;
-  const withTopic = view.vizLayers.filter((l) => l.topic);
+  const hasRadar = ((state.visualization && state.visualization.radar) || []).length > 0;
+  const withTopic = view.vizLayers.filter((l) => l.topic || (l.id === RADAR_LAYER_ID && hasRadar));
   if (!withTopic.length) {
     legend.innerHTML = '<span style="color:var(--muted)">레이어 미설정 — ⚙ 눌러서 토픽 지정</span>';
     return;
@@ -4428,6 +4464,12 @@ renderVizLegend();
 //         조향각 기반 예상 경로를 차로로 그린다.
 // camMode: off | auto(전방 1대) | all(전체) | select(cameras 목록), camLayout: strip | surround
 // @cockpit-share-begin (대시보드 cockpit.js 가 이 구간을 그대로 불러 실행함. 구간 밖 전역에 새로 의존하면 cockpit.js 의 대응 정의도 추가)
+// 레이더 원값(레이더 원점 기준 dx 전방, dy 좌측) → 차량 중심 기준 [전방, 좌측].
+// 원점 = 전방 레이더: 앞 범퍼 중앙 + radarFrontX, 후방 레이더: 뒤 범퍼 중앙 + radarRearX (후방 레이더 dx 는 뒤쪽이 음수)
+function radarToVeh(side, dx, dy) {
+  const base = side === 'rear' ? -vehicleGeom.length / 2 + (vehicleGeom.radarRearX || 0) : vehicleGeom.length / 2 + (vehicleGeom.radarFrontX || 0);
+  return [base + dx, dy];
+}
 const DRIVE_DEFAULTS = {
   tracks: true, clusters: true, radar: true, lidar: false, path: true,
   camMode: 'auto', cameras: [], camLayout: 'strip',
@@ -4583,10 +4625,14 @@ function driveScene() {
       if (o) clusters.push(o);
       continue;
     }
-    if (m.kind !== 'radar' || [4, 5].includes(m.type)) continue;
-    for (const p of m.points || []) {
-      const [f, l] = toVeh(p[0] || 0, p[1] || 0);
-      radar.push({ x: f, y: l, z: p[2] || 0, dist: vehEdgeDist(p[0] || 0, p[1] || 0) });
+  }
+  // 레이더 마커(/radar_markers/*)는 RViz 용 좌표라 쓰지 않고 RadarMsg 원값(viz.radar)을 차량 기준으로 변환
+  for (const r of viz.radar || []) {
+    if (isPlayTopic(r.topic) !== inPlay) continue;
+    for (const o of r.objects || []) {
+      const [f, l] = radarToVeh(r.side, o[0], o[1]);
+      const dist = Math.hypot(Math.max(0, Math.abs(f) - vehicleGeom.length / 2), Math.max(0, Math.abs(l) - vehicleGeom.width / 2));
+      radar.push({ x: f, y: l, z: 0, dist, side: r.side, moving: !!o[4] });
     }
   }
   // 트랙과 겹치는 클러스터(트랙의 원본)는 중복 표시하지 않음
@@ -5300,7 +5346,7 @@ function commitDriveSettingsEdit(save) {
       const key = el.dataset.vgeom;
       if (key === 'forward') { vehicleGeom.forward = el.value; return; }
       const n = Number(el.value);
-      if (Number.isFinite(n) && (n > 0 || key === 'cx' || key === 'cy')) vehicleGeom[key] = n;
+      if (Number.isFinite(n) && (n > 0 || key === 'cx' || key === 'cy' || key.startsWith('radar'))) vehicleGeom[key] = n;
     });
     if (JSON.stringify(vehicleGeom) !== before) {
       localStorage.setItem('rosWebVehicleGeom', JSON.stringify(vehicleGeom));

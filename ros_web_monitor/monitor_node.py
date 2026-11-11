@@ -643,6 +643,7 @@ class MonitorNode(Node):
         self.visual_points = {}
         self.visual_boxes = {}
         self.visual_markers = {}
+        self.visual_radar = {}   # RadarMsg 토픽 → 레이더 원값(dx 전방, dy 좌측) — 웹이 차량 설정의 장착 위치로 변환
         self.visual_last_processed = {}
         self.system_cache = {}
         self.system_cache_stamp = 0.0
@@ -821,6 +822,7 @@ class MonitorNode(Node):
         self.visual_points.pop(name, None)
         self.visual_boxes.pop(name, None)
         self.visual_markers.pop(name, None)
+        self.visual_radar.pop(name, None)
         self.visual_last_processed.pop(name, None)
         # 스트림 대기 중인 클라이언트가 있으면 깨워서 종료 판단하게 함
         condition = self.camera_conditions.pop(name, None)
@@ -850,6 +852,8 @@ class MonitorNode(Node):
                 callback = lambda msg, topic=name: self.handle_marker_array(topic, msg)
             elif type_name == 'visualization_msgs/msg/Marker':
                 callback = lambda msg, topic=name: self.handle_marker(topic, msg)
+            elif type_name == RADAR_MSG_TYPE:
+                callback = lambda msg, topic=name: self.handle_radar(topic, msg)
             elif type_name == 'vision_msgs/msg/Detection3DArray':
                 callback = lambda msg, topic=name: self.handle_detection_array(topic, msg)
             elif type_name in ('sensor_msgs/msg/NavSatFix', 'gps_msgs/msg/GPSFix') or \
@@ -1032,6 +1036,29 @@ class MonitorNode(Node):
         with self.lock:
             self.visual_boxes[topic] = {'stamp': _now(), 'items': boxes[:40]}
             self.visual_markers[topic] = {'stamp': _now(), 'items': markers[:40]}
+
+    def handle_radar(self, topic, msg):
+        """can_parser RadarMsg(Bosch 레이더 40개 객체) → 유효 객체 [dx, dy, vx, vy, moving, id]."""
+        with self.lock:
+            stat = self.stats.get(topic)
+            if stat:
+                stat.record()
+        side = radar_side(topic)
+        if side is None or not self.should_process_visual(topic):
+            return
+        objects = []
+        for a, b in zip(msg.data_a, msg.data_b):
+            dx, dy = float(a.dx), float(a.dy)
+            if not (math.isfinite(dx) and math.isfinite(dy)) or dx >= 200.0 or abs(dy) >= 200.0:
+                continue   # 센티넬(빈 슬롯)
+            if abs(dx) < 1e-3 and abs(dy) < 1e-3:
+                continue
+            objects.append([round(dx, 2), round(dy, 2), round(float(a.vx), 2), round(float(a.vy), 2),
+                            1 if b.moving else 0, int(a.id)])
+        with self.lock:
+            if stat:
+                stat.last_value = {'objects': len(objects)}
+            self.visual_radar[topic] = {'topic': topic, 'side': side, 'stamp': _now(), 'objects': objects}
 
     def handle_detection_array(self, topic, msg):
         with self.lock:
@@ -1579,6 +1606,11 @@ class MonitorNode(Node):
             for layer in self.visual_markers.values():
                 if now - layer['stamp'] < 5.0:
                     marker_items.extend(layer['items'])
+            radar = [
+                {'topic': r['topic'], 'side': r['side'], 'objects': r['objects'], 'age_sec': round(now - r['stamp'], 2)}
+                for r in self.visual_radar.values()
+                if now - r['stamp'] < 2.0
+            ]
         point_layers.sort(key=lambda item: item['topic'])
         return {
             'range_m': int(self.visual_range_m),
@@ -1586,6 +1618,7 @@ class MonitorNode(Node):
             'merge_output': self.merge_output,
             'boxes': box_items[:420],
             'markers': marker_items[:420],
+            'radar': radar,
         }
 
     def snapshot(self):
@@ -2803,6 +2836,19 @@ def marker_to_visual(topic, marker):
             'kind': kind,
         })
     return boxes, markers
+
+
+RADAR_MSG_TYPE = 'can_parser_msgs/msg/RadarMsg'
+
+
+def radar_side(topic):
+    """레이더 객체 토픽의 장착 위치 (front/rear). 진단 토픽(/Radar_Info 등)은 None."""
+    lowered = topic.lower()
+    if 'rear' in lowered:
+        return 'rear'
+    if 'front' in lowered:
+        return 'front'
+    return None
 
 
 def marker_color(topic):

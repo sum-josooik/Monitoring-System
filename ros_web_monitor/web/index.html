@@ -315,7 +315,11 @@
                 <label class="vsm-field"><span>폭 (m)</span><input type="number" min="0.5" max="5" step="0.1" data-vgeom="width"></label>
                 <label class="vsm-field"><span>높이 (m)</span><input type="number" min="0.5" max="5" step="0.1" data-vgeom="height"></label>
               </div>
-              <p class="set-hint">기본값은 multi_lidar_merge 의 remove_vehicle 영역(x −1.3~1.7, y −2.5~5.7, 전방 +y)입니다. 거리·방위·근접 경고·주행 뷰가 모두 이 차체를 기준으로 계산됩니다.</p>
+              <div class="vsm-row">
+                <label class="vsm-field"><span>전방 레이더 위치 (m)</span><input type="number" min="-10" max="10" step="0.1" data-vgeom="radarFrontX" title="앞 범퍼 중앙 기준, +전방"></label>
+                <label class="vsm-field"><span>후방 레이더 위치 (m)</span><input type="number" min="-10" max="10" step="0.1" data-vgeom="radarRearX" title="뒤 범퍼 중앙 기준, +전방"></label>
+              </div>
+              <p class="set-hint">기본값은 multi_lidar_merge 의 remove_vehicle 영역(x −1.3~1.7, y −2.5~5.7, 전방 +y)입니다. 거리·방위·근접 경고·주행 뷰가 모두 이 차체를 기준으로 계산됩니다. 레이더(전방 can5 · 후방 can4)는 범퍼 중앙을 원점으로 그리며, 실제 장착 위치가 다르면 레이더 위치(+전방)로 맞춥니다.</p>
             </section>
             <section class="vsm-section" id="vsmDriveSection">
               <div class="vsm-section-title">주행 뷰 <span class="vsm-hint">— RViz 패널의 3D 주행 · 2D 레이더 탭</span></div>
