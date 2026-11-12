@@ -1955,7 +1955,7 @@ function drawVizLabels(labels) {
   }
 }
 
-// 자차: 바닥 그림자 + 차체(불투명 직육면체, 면 깊이 정렬) + 진행 방향 화살표
+// 자차: 바닥 그림자 + 차체(bus_model.js 의 버스 3D 모델, 없으면 직육면체) + 진행 방향 화살표
 // 위치·방향·크기는 vehicleGeom (P 의 x=차량 전방, y=차량 좌측 로컬 좌표)
 function drawEgo3D(width, height) {
   const L = vehicleGeom.length, W = vehicleGeom.width, H = vehicleGeom.height;
@@ -1970,22 +1970,26 @@ function drawEgo3D(width, height) {
   glow.addColorStop(0, 'rgba(56,189,248,0.35)'); glow.addColorStop(1, 'rgba(56,189,248,0)');
   vizCtx.fillStyle = glow;
   vizCtx.beginPath(); vizCtx.arc(g0.x, g0.y, Math.max(20, g0.scale * 4.5), 0, Math.PI * 2); vizCtx.fill();
-  const faces = [
-    { i: [0, 2, 6, 4], fill: '#0b131c' }, { i: [1, 3, 7, 5], fill: '#f0765a', top: true },
-    { i: [4, 5, 7, 6], fill: '#1d2b3a' }, { i: [0, 1, 3, 2], fill: '#16222f', rear: true },
-    { i: [0, 1, 5, 4], fill: '#1a2734' }, { i: [2, 3, 7, 6], fill: '#1a2734' },
-  ];
-  for (const f of faces) f.depth = f.i.reduce((a, k) => a + v[k].depth, 0) / 4;
-  faces.sort((a, b) => b.depth - a.depth);
-  for (const f of faces) {
-    vizCtx.beginPath();
-    f.i.forEach((k, n) => (n ? vizCtx.lineTo(v[k].x, v[k].y) : vizCtx.moveTo(v[k].x, v[k].y)));
-    vizCtx.closePath();
-    vizCtx.fillStyle = f.fill;
-    vizCtx.fill();
-    vizCtx.strokeStyle = 'rgba(210,225,240,0.85)';
-    vizCtx.lineWidth = 1.2;
-    vizCtx.stroke();
+  const mesh = typeof busModel !== 'undefined'
+    && busModel.draw(vizCtx, (x, y, z) => { const q = P(x, y, z); return q.visible ? q : null; }, { L, W, H });
+  if (!mesh) {
+    const faces = [
+      { i: [0, 2, 6, 4], fill: '#0b131c' }, { i: [1, 3, 7, 5], fill: '#f0765a', top: true },
+      { i: [4, 5, 7, 6], fill: '#1d2b3a' }, { i: [0, 1, 3, 2], fill: '#16222f', rear: true },
+      { i: [0, 1, 5, 4], fill: '#1a2734' }, { i: [2, 3, 7, 6], fill: '#1a2734' },
+    ];
+    for (const f of faces) f.depth = f.i.reduce((a, k) => a + v[k].depth, 0) / 4;
+    faces.sort((a, b) => b.depth - a.depth);
+    for (const f of faces) {
+      vizCtx.beginPath();
+      f.i.forEach((k, n) => (n ? vizCtx.lineTo(v[k].x, v[k].y) : vizCtx.moveTo(v[k].x, v[k].y)));
+      vizCtx.closePath();
+      vizCtx.fillStyle = f.fill;
+      vizCtx.fill();
+      vizCtx.strokeStyle = 'rgba(210,225,240,0.85)';
+      vizCtx.lineWidth = 1.2;
+      vizCtx.stroke();
+    }
   }
   // 진행 방향 화살표 (차 앞 지면)
   const a = P(L / 2 + 0.6, 0, 0.05), b = P(L / 2 + 3.6, 0, 0.05), l = P(L / 2 + 2.5, 0.8, 0.05), r = P(L / 2 + 2.5, -0.8, 0.05);
@@ -4257,6 +4261,19 @@ if (playSeekBarEl) {
   });
 }
 $('#headerSettings').addEventListener('click', openSettingsModal);
+
+// ── 테마 (다크 / 라이트) — 저장: localStorage.rosWebTheme, 기존 화면과 대시보드가 같이 씀 ──
+function applyTheme(theme) {
+  const t = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('rosWebTheme', t); } catch (_) { /* 저장 불가 */ }
+  const btn = document.getElementById('themeToggle');
+  if (btn) { btn.textContent = t === 'light' ? '☀' : '☾'; btn.title = t === 'light' ? '라이트 모드 (누르면 다크 모드)' : '다크 모드 (누르면 라이트 모드)'; }
+}
+applyTheme(document.documentElement.dataset.theme);
+document.getElementById('themeToggle')?.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'));
+window.addEventListener('storage', (e) => { if (e.key === 'rosWebTheme' && e.newValue) applyTheme(e.newValue); });
+
 $('#bagModalClose').addEventListener('click', () => closeSettingsModal(false));
 $('#bagOverlay').addEventListener('click', () => closeSettingsModal(false));
 $('#bagModalCancel').addEventListener('click', () => closeSettingsModal(false));
@@ -4822,6 +4839,18 @@ function drawCar(cam, o, accent, opts = {}) {
     { fill: 'rgba(30,44,60,0.95)', side2: 'rgba(40,60,80,0.95)', top: accent, stroke });
 }
 
+// 자차: 버스 3D 모델 (bus_model.js). 모델을 못 불러왔으면 기존 상자 모형
+function drawEgoBus(cam) {
+  const L = vehicleGeom.length, W = vehicleGeom.width, H = vehicleGeom.height;
+  if (typeof busModel === 'undefined') {
+    drawCar(cam, { x: 0, y: 0, sx: L, sy: W, sz: H, yaw: 0 }, DRIVE_COLORS.ego, { body: DRIVE_COLORS.egoBody, tail: '#ff5d6c', stroke: 'rgba(200,220,240,0.85)' });
+    return;
+  }
+  driveCtx.fillStyle = 'rgba(0,0,0,0.4)';
+  if (fillPoly3(cam, [[-L / 2 - 0.3, -W / 2 - 0.1, 0.01], [L / 2 + 0.3, -W / 2 - 0.1, 0.01], [L / 2 + 0.3, W / 2 + 0.1, 0.01], [-L / 2 - 0.3, W / 2 + 0.1, 0.01]])) driveCtx.fill();
+  busModel.draw(driveCtx, (f, l, z) => { const q = project(cam, [f, l, z]); return q ? { x: q.x, y: q.y, depth: q.z } : null; }, { L, W, H });
+}
+
 // placed: 이미 그린 라벨 사각형 목록 — 겹치면 건너뜀 (가까운 객체부터 호출)
 function drawLabel(x, y, parts, border, placed) {
   driveCtx.font = '600 12px "Pretendard Variable", Pretendard, Inter, system-ui, sans-serif';
@@ -5074,8 +5103,7 @@ function renderDrive3D(sc) {
   // 객체·자차를 깊이 순으로
   const items = [];
   const depthOf = (x, y) => camSpace(cam, [x, y, 0.8])[2];
-  items.push({ depth: depthOf(0, 0), draw: () => drawCar(cam, { x: 0, y: 0, sx: vehicleGeom.length, sy: vehicleGeom.width, sz: vehicleGeom.height, yaw: 0 }, DRIVE_COLORS.ego,
-    { body: DRIVE_COLORS.egoBody, tail: '#ff5d6c', stroke: 'rgba(200,220,240,0.85)' }) });
+  items.push({ depth: depthOf(0, 0), draw: () => drawEgoBus(cam) });
   for (const t of sc.tracks) {
     const isLead = t === sc.lead;
     items.push({ depth: depthOf(t.x, t.y), obj: t, draw: () => drawCar(cam, t, isLead ? DRIVE_COLORS.lead : '#e8eef5',
@@ -5258,12 +5286,17 @@ function renderRadar2D(sc) {
   // 자차
   const [ex, ey] = toS(0, 0);
   const ew = Math.max(12, vehicleGeom.width * scale), eh = Math.max(22, vehicleGeom.length * scale);
-  driveCtx.fillStyle = '#e8eef5';
-  driveCtx.beginPath();
-  if (driveCtx.roundRect) driveCtx.roundRect(ex - ew / 2, ey - eh / 2, ew, eh, 3); else driveCtx.rect(ex - ew / 2, ey - eh / 2, ew, eh);
-  driveCtx.fill();
-  driveCtx.fillStyle = DRIVE_COLORS.ego;
-  driveCtx.fillRect(ex - ew / 2 + 2, ey - eh / 2 + 2, ew - 4, Math.max(3, eh * 0.14));
+  // 위에서 본 버스 모델 (너무 작게 보일 때와 모델이 없을 때는 기존 사각형)
+  const busTop = eh >= 34 && typeof busModel !== 'undefined'
+    && busModel.draw(driveCtx, (f, l, z) => ({ x: ex - l * scale, y: ey - f * scale, depth: -z }), { L: vehicleGeom.length, W: vehicleGeom.width, H: vehicleGeom.height });
+  if (!busTop) {
+    driveCtx.fillStyle = '#e8eef5';
+    driveCtx.beginPath();
+    if (driveCtx.roundRect) driveCtx.roundRect(ex - ew / 2, ey - eh / 2, ew, eh, 3); else driveCtx.rect(ex - ew / 2, ey - eh / 2, ew, eh);
+    driveCtx.fill();
+    driveCtx.fillStyle = DRIVE_COLORS.ego;
+    driveCtx.fillRect(ex - ew / 2 + 2, ey - eh / 2 + 2, ew - 4, Math.max(3, eh * 0.14));
+  }
   driveCtx.restore();
   drawCameraTiles(width, height);
 }

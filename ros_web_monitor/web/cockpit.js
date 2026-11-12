@@ -332,22 +332,30 @@ function drawLidar(s) {
     g.stroke();
   }
   const hd = vehHeading(), ch = Math.cos(hd), sh = Math.sin(hd), hl = GEOM.length / 2, hw = GEOM.width / 2;
-  wire([[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]].map(([f, l]) => [GEOM.cx + f * ch - l * sh, GEOM.cy + f * sh + l * ch]), 0, GEOM.height, '#ffffff');
+  // 자차: 버스 3D 모델 (bus_model.js), 못 불러왔으면 흰 상자
+  const bus = typeof busModel !== 'undefined' && busModel.draw(g, (f, l, z) => {
+    const x = GEOM.cx + f * ch - l * sh, y = GEOM.cy + f * sh + l * ch, q = P(x, y, z);
+    if (!q.ok) return null;
+    const c = ui.lidar, fw = Math.cos(c.yaw) * x - Math.sin(c.yaw) * y;
+    return { x: q.x, y: q.y, depth: fw * Math.cos(c.pitch) - z * Math.sin(c.pitch) };
+  }, { L: GEOM.length, W: GEOM.width, H: GEOM.height });
+  if (!bus) wire([[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]].map(([f, l]) => [GEOM.cx + f * ch - l * sh, GEOM.cy + f * sh + l * ch]), 0, GEOM.height, '#ffffff');
 }
 
 function drawChart() {
+  const cs = getComputedStyle(document.documentElement), cText = cs.getPropertyValue('--text').trim() || cText, cDim = cs.getPropertyValue('--dim').trim() || cDim;   // 테마(다크/라이트)에 맞는 글자색
   const [g, w, h] = fit($('chartCv'));
   const now = performance.now() / 1000, L = 40, R = 8, gap = 8, B = 16, ph = (h - B - gap * 2) / 3;
   const speedColor = '#57c7ff', series = [['Speed (km/h)', 'speed', speedColor], ['Steer (°)', 'steer', '#3ddc84'], ['Accel (m/s², 속도 변화)', 'accel', '#f2b441']];
   g.font = '11px system-ui, sans-serif';
   series.forEach(([name, key, color], i) => {
     const top = i * (ph + gap), pts = history.filter((p) => p[key] != null);
-    g.strokeStyle = 'rgba(120,150,180,.14)'; g.strokeRect(L, top, w - L - R, ph);
-    g.fillStyle = '#c4ced8'; g.fillText(name, L + 6, top + 13);
-    if (pts.length < 2) { g.fillStyle = '#8d9aa8'; g.fillText('데이터 없음', L + (w - L - R) / 2 - 28, top + ph / 2 + 4); return; }
+    g.strokeStyle = 'rgba(120,150,180,.3)'; g.strokeRect(L, top, w - L - R, ph);
+    g.fillStyle = cText; g.fillText(name, L + 6, top + 13);
+    if (pts.length < 2) { g.fillStyle = cDim; g.fillText('데이터 없음', L + (w - L - R) / 2 - 28, top + ph / 2 + 4); return; }
     let lo = Math.min(...pts.map((p) => p[key])), hi = Math.max(...pts.map((p) => p[key]));
     if (hi - lo < 1) { const c = (hi + lo) / 2; lo = c - 0.5; hi = c + 0.5; }
-    g.fillStyle = '#8d9aa8'; g.fillText(hi.toFixed(hi < 10 ? 1 : 0), 4, top + 11); g.fillText(lo.toFixed(lo > -10 && lo < 10 ? 1 : 0), 4, top + ph - 2);
+    g.fillStyle = cDim; g.fillText(hi.toFixed(hi < 10 ? 1 : 0), 4, top + 11); g.fillText(lo.toFixed(lo > -10 && lo < 10 ? 1 : 0), 4, top + ph - 2);
     g.strokeStyle = color; g.lineWidth = 1.6; g.beginPath();
     pts.forEach((p, n) => {
       const x = L + (1 - (now - p.t) / HISTORY_SEC) * (w - L - R), y = top + ph - (p[key] - lo) / (hi - lo) * ph;
@@ -364,7 +372,7 @@ function drawChart() {
     g.fillText(lastP[key].toFixed(Math.abs(lastP[key]) < 10 ? 2 : 1).replace(/^-(0\.0+)$/, '$1'), w - R - 6, top + 15);
     g.textAlign = 'left'; g.font = '11px system-ui, sans-serif';
   });
-  g.fillStyle = '#8d9aa8';
+  g.fillStyle = cDim;
   for (let t = 60; t >= 0; t -= 20) g.fillText(t ? `-${t}s` : '0s', L + (1 - t / HISTORY_SEC) * (w - L - R) - (t ? 10 : 14), h - 3);
 }
 
@@ -701,3 +709,15 @@ function connectEvents() {
   source.onerror = () => setLink('bad', '연결 끊김');
 }
 connectEvents();
+
+// ── 테마 (다크 / 라이트) — 저장: localStorage.rosWebTheme, 기존 화면과 대시보드가 같이 씀 ──
+function applyTheme(theme) {
+  const t = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('rosWebTheme', t); } catch (_) { /* 저장 불가 */ }
+  const btn = document.getElementById('themeToggle');
+  if (btn) { btn.textContent = t === 'light' ? '☀' : '☾'; btn.title = t === 'light' ? '라이트 모드 (누르면 다크 모드)' : '다크 모드 (누르면 라이트 모드)'; }
+}
+applyTheme(document.documentElement.dataset.theme);
+document.getElementById('themeToggle')?.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'));
+window.addEventListener('storage', (e) => { if (e.key === 'rosWebTheme' && e.newValue) applyTheme(e.newValue); });

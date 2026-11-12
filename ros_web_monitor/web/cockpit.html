@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>자율주행 대시보드</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script>
+    // 테마(다크/라이트)를 첫 화면이 그려지기 전에 적용 — 저장값이 없으면 다크
+    (function () { try { var t = localStorage.getItem('rosWebTheme'); document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark'; } catch (e) { document.documentElement.dataset.theme = 'dark'; } })();
+  </script>
   <link rel="stylesheet" href="/cockpit.css">
 </head>
 <body>
@@ -23,6 +27,7 @@
     <button id="playBtn" type="button" class="play-btn" title="저장된 Bag 재생">▶ Play</button>
     <button id="rebootBtn" type="button" class="power" title="재부팅 (reboot)">재부팅</button>
     <button id="shutdownBtn" type="button" class="power danger" title="종료 (shutdown -h now)">종료</button>
+    <button id="themeToggle" type="button" class="theme-toggle" title="다크 / 라이트 모드 전환" aria-label="다크 / 라이트 모드 전환"></button>
     <button id="full" type="button" title="전체 화면" aria-label="전체 화면">⛶</button>
     <a class="back" href="/">기존 화면</a>
   </header>
@@ -161,6 +166,7 @@
   </dialog>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/bus_model.js"></script>
   <script src="/cockpit.js"></script>
 </body>
 </html>

@@ -2921,6 +2921,8 @@ def make_handler(node):
                 self.serve_file(STATIC_DIR / 'app.css')
             elif parsed.path == '/app.js':
                 self.serve_file(STATIC_DIR / 'app.js')
+            elif parsed.path == '/bus_model.js':
+                self.serve_file(STATIC_DIR / 'bus_model.js')
             elif parsed.path == '/cockpit':
                 self.serve_file(STATIC_DIR / 'cockpit.html')
             elif parsed.path == '/cockpit.js':

@@ -6,6 +6,10 @@
     <title>ROS Web Monitor</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&display=swap">
+    <script>
+      // 테마(다크/라이트)를 첫 화면이 그려지기 전에 적용 — 저장값이 없으면 다크
+      (function () { try { var t = localStorage.getItem('rosWebTheme'); document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark'; } catch (e) { document.documentElement.dataset.theme = 'dark'; } })();
+    </script>
     <link rel="stylesheet" href="/app.css">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   </head>
@@ -43,6 +47,7 @@
         <div class="stat-item" data-hitem="stat-topics"><strong id="topicCount">0</strong><span>topics</span></div>
         <div class="stat-item" data-hitem="stat-active"><strong id="activeCount">0</strong><span>active</span></div>
         <div class="stat-item" data-hitem="stat-cameras"><strong id="cameraCount">0</strong><span>cameras</span></div>
+        <button id="themeToggle" type="button" class="header-gear theme-toggle" title="다크 / 라이트 모드 전환" aria-label="다크 / 라이트 모드 전환"></button>
         <button id="headerSettings" type="button" class="header-gear" title="화면 / Bag 설정">⚙</button>
       </div>
     </header>
@@ -568,6 +573,7 @@
         } catch (_) { /* 실패 시 기본 화면으로 시작 */ }
       })();
     </script>
+    <script src="/bus_model.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
