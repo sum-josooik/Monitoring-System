@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>주행 모델 시뮬레이션</title>
+  <script>
+    (function () { try { var t = localStorage.getItem('rosWebTheme'); document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark'; } catch (e) { document.documentElement.dataset.theme = 'dark'; } })();
+  </script>
+  <link rel="stylesheet" href="/cockpit.css">
+  <link rel="stylesheet" href="/sim.css">
+</head>
+<body>
+  <header class="top">
+    <strong class="brand">SUM</strong>
+    <h1>Driving Model Simulation <span>(주행 모델 시뮬레이션 · 오픈루프)</span></h1>
+    <div class="spacer"></div>
+    <span id="link" class="pill wait">연결 중</span>
+    <div class="mode-seg" id="simMode" role="group" aria-label="입력 영상">
+      <button type="button" data-mode="live" class="on">실시간 카메라</button>
+      <button type="button" data-mode="play">Bag 재생</button>
+    </div>
+    <button id="themeToggle" type="button" class="theme-toggle" title="다크 / 라이트 모드 전환" aria-label="다크 / 라이트 모드 전환"></button>
+    <a class="back" href="/cockpit">대시보드</a>
+    <a class="back" href="/">기존 화면</a>
+  </header>
+
+  <div id="playBar" class="play-bar" hidden>
+    <button id="pbPause" type="button" aria-label="일시정지/재생" title="일시정지/재생">⏸</button>
+    <span id="pbText" class="pb-text"></span>
+    <span id="pbCur" class="pb-time">0:00</span>
+    <input id="pbSeek" type="range" min="0" max="1" step="0.1" value="0" aria-label="재생 위치">
+    <span id="pbDur" class="pb-time">0:00</span>
+    <select id="pbRate" aria-label="배속" title="배속">
+      <option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option>
+    </select>
+    <button id="pbOpen" type="button">다른 Bag</button>
+    <button id="pbStop" type="button">■ 중지</button>
+  </div>
+
+  <main class="sim-grid">
+    <aside class="sim-left">
+      <section class="card">
+        <h2>모델 <small>켠 모델만 GPU 를 씁니다</small><span class="spacer"></span><button type="button" id="catOpen" class="mini" title="sunnylink.wiki 카테고리에서 모델을 골라 내려받기">＋ 모델 추가</button></h2>
+        <ul id="modelList" class="model-list"></ul>
+        <p class="hint">sunnypilot 주행 모델(비전 + 정책)을 버스 전방 카메라 영상으로 돌립니다. 차량은 제어하지 않습니다.</p>
+      </section>
+      <section class="card">
+        <h2>카메라 장착 <small id="camName"></small></h2>
+        <div class="cam-form" id="camForm">
+          <label>높이 (m)<input type="number" data-k="height" step="0.05" min="0.5" max="4.5"></label>
+          <label>숙임 (°, +아래)<input type="number" data-k="pitch" step="0.5" min="-20" max="30"></label>
+          <label>좌우 (°, +왼쪽)<input type="number" data-k="yaw" step="0.5" min="-20" max="20"></label>
+          <label>기울기 (°)<input type="number" data-k="roll" step="0.5" min="-10" max="10"></label>
+          <label>차량 중심에서 앞 (m)<input type="number" data-k="forward" step="0.1" min="-6" max="6"></label>
+          <label>높이 보정<select data-k="height_mode"><option value="ground">노면 기준 (1.22 m 로 변환)</option><option value="none">없음 (회전만)</option></select></label>
+        </div>
+        <div class="row"><button type="button" id="camApply">적용</button><span id="camMsg" class="dim"></span></div>
+        <p class="hint">모델 입력 영상에서 수평선(노란 점선)이 실제 지평선·먼 바닥 끝과 겹치도록 숙임 값을 맞추세요. 모델은 높이 1.22 m 카메라를 전제로 학습됐습니다.</p>
+      </section>
+    </aside>
+
+    <section class="card sim-view">
+      <h2>모델 입력 영상 + 예측 <small id="viewInfo"></small></h2>
+      <div class="view-wrap">
+        <canvas id="wideCv" width="1024" height="512"></canvas>
+      </div>
+      <div class="legend-row" id="legend"></div>
+    </section>
+
+    <section class="card sim-bev">
+      <h2>예측 뷰어
+        <span class="seg2" id="bevView"><button type="button" data-v="3d" class="on">3D</button><button type="button" data-v="top">위에서</button></span>
+        <span class="seg2" id="bevRange"><button type="button" data-r="40">40 m</button><button type="button" data-r="80" class="on">80 m</button><button type="button" data-r="160">160 m</button></span>
+        <button type="button" id="bevReset" class="mini" title="시점 초기화" aria-label="시점 초기화">↺</button>
+      </h2>
+      <div class="layer-row" id="bevLayers" role="group" aria-label="표시할 항목">
+        <button type="button" data-l="lidar" class="on">LiDAR</button><button type="button" data-l="radar" class="on">레이더</button>
+        <button type="button" data-l="cluster" class="on">클러스터</button><button type="button" data-l="pred" class="on">모델 예측</button>
+        <span id="bevInfo" class="dim"></span>
+      </div>
+      <div class="bev-wrap"><canvas id="bevCv"></canvas><span class="bev-hint" id="bevHint">드래그 회전 · 휠 확대 · 더블클릭 초기화</span></div>
+    </section>
+
+    <section class="card sim-cams">
+      <h2>카메라
+        <span class="seg2" id="camTabs"><button type="button" data-t="cam" class="on" title="카메라 8대 + AVM">카메라</button><button type="button" data-t="object">객체 인지</button><button type="button" data-t="road">도로 인지</button></span>
+        <small id="camInfo"></small><span class="spacer"></span>
+        <button type="button" id="camToggle" class="mini" title="영상 스트림을 끊어 부하를 줄입니다">접기</button>
+      </h2>
+      <div class="cam-grid" id="camGrid"></div>
+    </section>
+
+    <section class="card sim-table">
+      <h2>모델별 결과 <small id="tableInfo"></small><span class="spacer"></span><button type="button" id="resetStats" class="mini">누적 결과 초기화</button></h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th rowspan="2">모델</th><th colspan="6">현재</th><th colspan="7">누적</th></tr>
+            <tr><th>선행 물체</th><th>라이다</th><th>레이더</th><th>차선 (좌·우)</th><th>계획 속도</th><th>추론</th>
+                <th>프레임</th><th>차선 인식률</th><th>선행 인식률</th><th>라이다 대비 오차</th><th>레이더 대비 오차</th><th>경로 흔들림</th><th>평균 추론</th></tr>
+          </thead>
+          <tbody id="resultBody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="resultFile"></p>
+      <h2 class="sub">Bag 일괄 평가 <small>같은 Bag 을 모든 모델에 0.2초 간격으로 똑같이 넣은 결과</small><span class="spacer"></span><select id="bagSel" aria-label="Bag 선택"></select></h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>모델</th><th>프레임</th><th>차선 인식률</th><th>선행 인식률</th><th>라이다 대비 오차</th><th>GPS 속도 오차</th><th>모델/GPS 속도비</th><th>경로 흔들림</th><th>추론</th></tr></thead>
+          <tbody id="bagBody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="bagInfo"></p>
+    </section>
+  </main>
+  <dialog id="catDlg" class="dlg cat-dlg">
+    <h3>모델 추가 <small id="catMeta"></small></h3>
+    <p>sunnylink.wiki 의 카테고리에서 모델을 골라 내려받습니다. 받은 뒤 이 장치용 엔진으로 변환하며(모델당 수 분), 끝나면 왼쪽 모델 목록에 나타납니다. 원본(ONNX)이 공개된 모델만 변환할 수 있습니다.</p>
+    <div class="cat-body">
+      <nav class="cat-nav" id="catNav"></nav>
+      <div class="cat-main">
+        <p class="cat-desc" id="catDesc"></p>
+        <label class="dlg-check"><input id="catOnly" type="checkbox"> 받을 수 있는 모델만 보기</label>
+        <div class="cat-list" id="catList"></div>
+      </div>
+    </div>
+    <footer>
+      <span id="catNote" class="dim"></span><span class="spacer"></span>
+      <button id="catRefresh" type="button">목록 새로고침</button>
+      <button id="catClose" type="button">닫기</button>
+    </footer>
+  </dialog>
+  <dialog id="playDlg" class="dlg play-dlg">
+    <h3>Bag 불러오기</h3>
+    <p>저장된 Bag 을 고르면 재생을 시작하고, 모델 입력을 그 Bag 의 전방 카메라 영상으로 바꿉니다. 재생 데이터는 <code>/bagplay/...</code> 로 분리되어 실시간 데이터와 섞이지 않습니다.</p>
+    <label class="dlg-check"><input id="playLoop" type="checkbox" checked> 반복 재생</label>
+    <div id="playFiles" class="play-files"></div>
+    <footer>
+      <button id="playDlgStop" type="button" hidden>■ 재생 중지</button>
+      <button id="playDlgClose" type="button">닫기</button>
+    </footer>
+  </dialog>
+  <script src="/bus_model.js"></script>
+  <script src="/sim.js"></script>
+</body>
+</html>

@@ -46,6 +46,7 @@ except ImportError:
     lens_calib = None
 
 import rclpy
+import rclpy.executors
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rosidl_runtime_py.utilities import get_message
@@ -612,6 +613,23 @@ class MonitorNode(Node):
         self.scan_period_sec = float(self.get_parameter('scan_period_sec').value)
         self.rate_window_sec = float(self.get_parameter('rate_window_sec').value)
         self.subscribe_all = bool(self.get_parameter('subscribe_all').value)
+        # 압축 영상(카메라·인지 결과) 수신 전용 노드: 자체 스레드에서 돈다.
+        # 주 노드는 토픽 수백 개(CAN·텔레메트리 등 고주기 포함)를 한 루프에서 처리해 토픽당 초당 15건 안팎만 받는다(측정).
+        # 영상을 같은 루프에 두면 그 뒤에 밀려 1~3 Hz 로 끊기므로 따로 받는다. 핸들러는 self.lock 으로 보호돼 있다.
+        self.image_node = rclpy.create_node(self.get_name() + '_images')
+        self.image_executor = rclpy.executors.SingleThreadedExecutor()
+        self.image_executor.add_node(self.image_node)
+        threading.Thread(target=self._spin_images, name='image_rx', daemon=True).start()
+        # 주행 모델 시뮬레이션(sp_sim 노드): 상태·입력 미리보기 JSON 을 그대로 전달, 제어 명령 발행
+        from std_msgs.msg import String as _SimString
+        self._sim_msg = _SimString
+        self.sim_state = (0.0, '')
+        self.sim_preview = (0.0, '')
+        self.sim_control_pub = self.create_publisher(_SimString, '/sp_sim/control', 10)
+        self.create_subscription(_SimString, '/sp_sim/state', lambda m: setattr(self, 'sim_state', (time.monotonic(), m.data)), 2)
+        self.create_subscription(_SimString, '/sp_sim/preview', lambda m: setattr(self, 'sim_preview', (time.monotonic(), m.data)), 2)
+        self.sim_catalog = (0.0, '')
+        self.create_subscription(_SimString, '/sp_sim/catalog', lambda m: setattr(self, 'sim_catalog', (time.monotonic(), m.data)), 2)
         self.visual_max_points_per_topic = int(self.get_parameter('visual_max_points_per_topic').value)
         self.prune_after_sec = float(self.get_parameter('prune_after_sec').value)
 
@@ -764,6 +782,14 @@ class MonitorNode(Node):
             srv.server_close()
         super().destroy_node()
 
+    @staticmethod
+    def sim_json(item):
+        """sp_sim 이 보낸 JSON 문자열을 다시 풀지 않고 수신 경과 시간만 붙여 돌려준다."""
+        stamp, data = item
+        if not data:
+            return '{"age":null,"data":null}'
+        return '{"age":%.2f,"data":%s}' % (time.monotonic() - stamp, data)
+
     def scan_topics(self):
         topics = self.get_topic_names_and_types()
         seen = set()
@@ -783,7 +809,7 @@ class MonitorNode(Node):
                     sub = self.subscriptions_by_topic.pop(name, None)
                     if sub is not None:
                         try:
-                            self.destroy_subscription(sub)
+                            self._drop_subscription(sub)
                         except Exception:
                             pass
                 continue
@@ -812,7 +838,7 @@ class MonitorNode(Node):
         sub = self.subscriptions_by_topic.pop(name, None)
         if sub is not None:
             try:
-                self.destroy_subscription(sub)
+                self._drop_subscription(sub)
             except Exception:
                 pass
         self.camera_frames.pop(name, None)
@@ -830,6 +856,18 @@ class MonitorNode(Node):
             with condition:
                 condition.notify_all()
 
+    def _spin_images(self):
+        while rclpy.ok():
+            try:
+                self.image_executor.spin_once(timeout_sec=0.2)
+            except Exception:  # noqa: BLE001 — 한 메시지 실패로 영상 수신이 멈추지 않게
+                time.sleep(0.05)
+
+    def _drop_subscription(self, sub):
+        """구독 해제 (주 노드 또는 영상 전용 노드 중 그 구독을 만든 쪽에서)."""
+        if not self.destroy_subscription(sub):
+            self.image_node.destroy_subscription(sub)
+
     def subscribe_topic(self, name, type_name):
         try:
             msg_type = get_message(type_name)
@@ -840,6 +878,15 @@ class MonitorNode(Node):
             )
             if type_name == 'sensor_msgs/msg/CompressedImage':
                 callback = lambda msg, topic=name: self.handle_compressed_image(topic, msg)
+                # 영상은 한 장이 1 MB 를 넘어 여러 조각으로 온다. BEST_EFFORT 로 받으면 조각 하나만 빠져도 프레임 전체를 잃어
+                # 24 Hz 영상이 1~3 Hz 로 들어온다(측정). 발행 쪽이 모두 RELIABLE 이면(카메라·Bag 재생기) RELIABLE 로 받는다.
+                # 최신 1장만 보관해 밀리지 않게 한다. 발행 쪽이 BEST_EFFORT 면 RELIABLE 구독은 연결되지 않으므로 기존대로.
+                try:
+                    pubs = self.get_publishers_info_by_topic(name)
+                    if pubs and all(p.qos_profile.reliability == ReliabilityPolicy.RELIABLE for p in pubs):
+                        qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE)
+                except Exception:  # noqa: BLE001
+                    pass
             elif type_name == 'sensor_msgs/msg/Image' and is_streamable_raw_image_topic(name):
                 callback = lambda msg, topic=name: self.handle_raw_image(topic, msg)
             elif type_name in HEAVY_RAW_TYPES:
@@ -863,7 +910,8 @@ class MonitorNode(Node):
                 callback = lambda msg, topic=name, tn=type_name: self.handle_generic(topic, msg, tn)
             raw = type_name in HEAVY_RAW_TYPES and not (
                 type_name == 'sensor_msgs/msg/Image' and is_streamable_raw_image_topic(name))
-            sub = self.create_subscription(msg_type, name, callback, qos, raw=raw)
+            owner = self.image_node if type_name == 'sensor_msgs/msg/CompressedImage' else self
+            sub = owner.create_subscription(msg_type, name, callback, qos, raw=raw)
             self.subscriptions_by_topic[name] = sub
             with self.lock:
                 self.stats[name].last_error = ''
@@ -2923,6 +2971,32 @@ def make_handler(node):
                 self.serve_file(STATIC_DIR / 'app.js')
             elif parsed.path == '/bus_model.js':
                 self.serve_file(STATIC_DIR / 'bus_model.js')
+            elif parsed.path == '/sim':
+                self.serve_file(STATIC_DIR / 'sim.html')
+            elif parsed.path in ('/sim.js', '/sim.css'):
+                self.serve_file(STATIC_DIR / parsed.path[1:])
+            elif parsed.path == '/api/sim':
+                self.serve_json_str(node.sim_json(node.sim_state))
+            elif parsed.path == '/api/sim/preview':
+                self.serve_json_str(node.sim_json(node.sim_preview))
+            elif parsed.path == '/api/sim/catalog':
+                self.serve_json_str(node.sim_json(node.sim_catalog))
+            elif parsed.path == '/api/viz':
+                # 시뮬레이션 화면용: 전체 상태(/api/state) 대신 3D 표시 자료와 영상 포트만.
+                # ?play=0|1 을 주면 그 모드의 병합 라이다와 레이더만 보낸다 (전체는 약 1 MB, 걸러서 100 KB 안팎).
+                viz = node.visualization_snapshot()
+                want = parse_qs(parsed.query).get('play', [''])[0]
+                if want in ('0', '1'):
+                    ns = node.play_namespace + '/'
+                    mine = lambda topic: str(topic).startswith(ns) == (want == '1')   # noqa: E731
+                    merged = (node.play_namespace if want == '1' else '') + str(viz.get('merge_output') or '')
+                    layers = [l for l in viz['point_layers'] if l['topic'] == merged]
+                    if not layers:
+                        layers = [l for l in viz['point_layers'] if l.get('merge_part') and mine(l['topic'])]
+                    viz = {'merge_output': viz.get('merge_output'), 'point_layers': layers,
+                           'radar': [r for r in viz['radar'] if mine(r['topic'])]}
+                self.serve_json({'visualization': viz, 'stream_ports': list(getattr(node, 'stream_ports', [])),
+                                 'play_namespace': node.play_namespace})
             elif parsed.path == '/cockpit':
                 self.serve_file(STATIC_DIR / 'cockpit.html')
             elif parsed.path == '/cockpit.js':
@@ -2969,6 +3043,8 @@ def make_handler(node):
                 self.serve_json({'ok': True, **track})
             elif parsed.path == '/api/bag/play/list':
                 self.serve_json(node.list_play_bags())
+            elif parsed.path == '/api/bag/play/status':
+                self.serve_json(node.play_status())
             elif parsed.path == '/api/fs/list':
                 path = parse_qs(parsed.query).get('path', [''])[0]
                 self.serve_json(node.list_dir(path))
@@ -3141,6 +3217,16 @@ def make_handler(node):
                 except Exception:
                     pass
                 self.serve_json(node.set_bag_dir(path))
+            elif parsed.path == '/api/sim/control':
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                    if not isinstance(body, dict):
+                        raise ValueError
+                except Exception:
+                    self.serve_json({'ok': False, 'error': '요청 형식 오류'})
+                    return
+                node.sim_control_pub.publish(node._sim_msg(data=json.dumps(body)))
+                self.serve_json({'ok': True, 'running': time.monotonic() - node.sim_state[0] < 3.0})
             elif parsed.path == '/api/calibration_apply':
                 try:
                     body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
@@ -3268,6 +3354,10 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            node.image_node.destroy_node()
+        except Exception:
+            pass
         node.destroy_node()
         try:
             rclpy.shutdown()
